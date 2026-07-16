@@ -129,6 +129,7 @@ async fn create_test_managed_client(tools: Vec<ToolInfo>) -> ManagedClient {
         tool_timeout: None,
         server_instructions: None,
         server_supports_sandbox_state_meta_capability: false,
+        declares_channel_capability: false,
         codex_apps_tools_cache_context: None,
     }
 }

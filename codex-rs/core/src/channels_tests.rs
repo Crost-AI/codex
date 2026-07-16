@@ -67,40 +67,6 @@ async fn hub_drops_events_from_non_active_servers() {
     );
 }
 
-#[tokio::test]
-async fn hub_requeues_events_at_the_front() {
-    let hub = ChannelHub::new();
-    hub.set_setup_for_tests(ChannelSetup {
-        resolutions: Vec::new(),
-        active_servers: BTreeSet::from(["discord".to_string()]),
-    });
-    for content in ["one", "two"] {
-        hub.on_channel_event(
-            "discord".to_string(),
-            ChannelEvent {
-                content: content.to_string(),
-                meta: Default::default(),
-            },
-        )
-        .await;
-    }
-    let drained = hub.drain_events();
-    assert_eq!(drained.len(), 2);
-    hub.on_channel_event(
-        "discord".to_string(),
-        ChannelEvent {
-            content: "three".to_string(),
-            meta: Default::default(),
-        },
-    )
-    .await;
-    hub.requeue_front(drained);
-    let contents = hub.drain_events();
-    assert!(contents[0].contains("one"));
-    assert!(contents[1].contains("two"));
-    assert!(contents[2].contains("three"));
-}
-
 #[test]
 fn env_overlay_applies_only_to_active_stdio_servers() {
     let codex_home = tempfile::tempdir().expect("tempdir");

@@ -62,10 +62,14 @@ impl ChannelHub {
     /// Records the session's requested entries and effective policy so MCP
     /// runtime rebuilds can re-resolve against a fresh server set.
     pub(crate) fn configure(&self, config: &Config) {
-        *self.entries.lock().expect("channel entries lock poisoned") =
-            config.channels_entries.clone();
-        *self.policy.lock().expect("channel policy lock poisoned") =
-            config.channels_policy.clone();
+        *self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = config.channels_entries.clone();
+        *self
+            .policy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = config.channels_policy.clone();
     }
 
     /// Re-resolves the requested entries against the given MCP servers and
@@ -78,29 +82,28 @@ impl ChannelHub {
         let entries = self
             .entries
             .lock()
-            .expect("channel entries lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let policy = self
             .policy
             .lock()
-            .expect("channel policy lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let setup =
             resolve_session_channels(&entries, &policy, tool_plugin_provenance, mcp_servers);
-        *self.setup.lock().expect("channel setup lock poisoned") = setup.clone();
-        setup
-    }
-
-    pub(crate) fn setup(&self) -> ChannelSetup {
-        self.setup
+        *self
+            .setup
             .lock()
-            .expect("channel setup lock poisoned")
-            .clone()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = setup.clone();
+        setup
     }
 
     #[cfg(test)]
     fn set_setup_for_tests(&self, setup: ChannelSetup) {
-        *self.setup.lock().expect("channel setup lock poisoned") = setup;
+        *self
+            .setup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = setup;
     }
 
     /// Lets queued events wake the session. Events arriving before this is
@@ -116,7 +119,7 @@ impl ChannelHub {
         if !self
             .setup
             .lock()
-            .expect("channel setup lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_server_active(&server_name)
         {
             debug!("dropping channel event from non-active MCP server `{server_name}`");
@@ -124,7 +127,10 @@ impl ChannelHub {
         }
         let rendered = render_channel_event(&server_name, &event.content, &event.meta);
         {
-            let mut queue = self.queue.lock().expect("channel queue lock poisoned");
+            let mut queue = self
+                .queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if queue.push(rendered).is_some() {
                 warn!(
                     "channel event queue is full; dropped the oldest pending event \
@@ -141,23 +147,15 @@ impl ChannelHub {
         !self
             .queue
             .lock()
-            .expect("channel queue lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty()
     }
 
     fn drain_events(&self) -> Vec<String> {
         self.queue
             .lock()
-            .expect("channel queue lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .drain_all()
-    }
-
-    fn requeue_front(&self, events: Vec<String>) {
-        let mut queue = self.queue.lock().expect("channel queue lock poisoned");
-        let pending = queue.drain_all();
-        for event in events.into_iter().chain(pending) {
-            queue.push(event);
-        }
     }
 }
 
