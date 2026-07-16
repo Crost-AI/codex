@@ -481,6 +481,9 @@ impl ChatWidget {
             SlashCommand::Mcp => {
                 self.add_mcp_output(McpServerStatusDetail::ToolsAndAuthOnly);
             }
+            SlashCommand::Channels => {
+                self.add_channels_output();
+            }
             SlashCommand::Apps => {
                 self.add_connectors_output();
             }
@@ -1049,6 +1052,7 @@ impl ChatWidget {
             | SlashCommand::MemoryDrop
             | SlashCommand::MemoryUpdate
             | SlashCommand::Mcp
+            | SlashCommand::Channels
             | SlashCommand::Apps
             | SlashCommand::Plugins
             | SlashCommand::Rollout

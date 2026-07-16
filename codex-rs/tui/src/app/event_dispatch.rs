@@ -6,6 +6,7 @@
 use super::resize_reflow::trailing_run_start;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
+use crate::app_event::McpInventoryPurpose;
 use crate::app_server_session::ForkGoalContinuation;
 use crate::config_update::format_config_error;
 use crate::external_agent_config_migration_flow::ExternalAgentConfigMigrationFlowOutcome;
@@ -794,15 +795,20 @@ impl App {
                         .on_plugin_enabled_set(cwd, plugin_id, enabled, result);
                 }
             }
-            AppEvent::FetchMcpInventory { detail, thread_id } => {
-                self.fetch_mcp_inventory(app_server, detail, thread_id);
+            AppEvent::FetchMcpInventory {
+                detail,
+                thread_id,
+                purpose,
+            } => {
+                self.fetch_mcp_inventory(app_server, detail, thread_id, purpose);
             }
             AppEvent::McpInventoryLoaded {
                 result,
                 detail,
                 thread_id,
+                purpose,
             } => {
-                self.handle_mcp_inventory_result(result, detail, thread_id);
+                self.handle_mcp_inventory_result(result, detail, thread_id, purpose);
             }
             AppEvent::SkillsListLoaded { result } => {
                 self.handle_skills_list_result(

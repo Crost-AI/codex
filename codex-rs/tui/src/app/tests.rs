@@ -1,5 +1,6 @@
 //! App-level orchestration tests for the TUI.
 
+use crate::app_event::McpInventoryPurpose;
 #[path = "tests/advanced_reasoning_tests.rs"]
 mod advanced_reasoning_tests;
 mod model_catalog;
@@ -168,9 +169,13 @@ async fn handle_mcp_inventory_result_respects_origin_thread() {
             resources: Vec::new(),
             resource_templates: Vec::new(),
             auth_status: codex_app_server_protocol::McpAuthStatus::Unsupported,
+            source: None,
+            overridden_sources: Vec::new(),
+            declares_channel_capability: None,
         }]),
         McpServerStatusDetail::ToolsAndAuthOnly,
         /*thread_id*/ None,
+        McpInventoryPurpose::McpList,
     );
 
     assert_eq!(app.transcript_cells.len(), 0);
@@ -185,6 +190,7 @@ async fn handle_mcp_inventory_result_respects_origin_thread() {
         Ok(Vec::new()),
         McpServerStatusDetail::ToolsAndAuthOnly,
         Some(ThreadId::new()),
+        McpInventoryPurpose::McpList,
     );
 
     assert_eq!(app.transcript_cells.len(), 1);

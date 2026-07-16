@@ -7,6 +7,7 @@
 use super::plugin_mentions::fetch_plugin_mentions;
 use super::*;
 use crate::app_event::ConnectorsSnapshot;
+use crate::app_event::McpInventoryPurpose;
 use crate::app_info::app_info_from_api;
 use crate::config_update::format_config_error;
 use codex_app_server_protocol::AppsListParams;
@@ -40,6 +41,7 @@ impl App {
         app_server: &AppServerSession,
         detail: McpServerStatusDetail,
         thread_id: Option<ThreadId>,
+        purpose: McpInventoryPurpose,
     ) {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
@@ -52,6 +54,7 @@ impl App {
                 result,
                 detail,
                 thread_id,
+                purpose,
             });
         });
     }
@@ -678,6 +681,7 @@ impl App {
         result: Result<Vec<McpServerStatus>, String>,
         detail: McpServerStatusDetail,
         thread_id: Option<ThreadId>,
+        purpose: McpInventoryPurpose,
     ) {
         if thread_id.is_some() && thread_id != self.current_displayed_thread_id() {
             return;
@@ -694,6 +698,11 @@ impl App {
                 return;
             }
         };
+
+        if purpose == McpInventoryPurpose::ChannelsStatus {
+            self.chat_widget.add_channels_status_output(&statuses);
+            return;
+        }
 
         if statuses.is_empty() {
             self.chat_widget
@@ -1457,6 +1466,9 @@ mod tests {
                 resources: Vec::new(),
                 resource_templates: Vec::new(),
                 auth_status: codex_app_server_protocol::McpAuthStatus::Unsupported,
+            source: None,
+            overridden_sources: Vec::new(),
+            declares_channel_capability: None,
             },
             McpServerStatus {
                 name: "disabled".to_string(),
@@ -1465,6 +1477,9 @@ mod tests {
                 resources: Vec::new(),
                 resource_templates: Vec::new(),
                 auth_status: codex_app_server_protocol::McpAuthStatus::Unsupported,
+            source: None,
+            overridden_sources: Vec::new(),
+            declares_channel_capability: None,
             },
         ];
 

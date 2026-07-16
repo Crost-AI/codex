@@ -256,6 +256,7 @@ fn normalize_thread_name(name: &str) -> Option<String> {
 
 use crate::app_event::AppEvent;
 use crate::app_event::ExitMode;
+use crate::app_event::McpInventoryPurpose;
 use crate::app_event::PermissionProfileSelection;
 use crate::app_event::RateLimitRefreshOrigin;
 #[cfg(target_os = "windows")]
@@ -1523,7 +1524,39 @@ impl ChatWidget {
         self.app_event_tx.send(AppEvent::FetchMcpInventory {
             detail,
             thread_id: self.thread_id(),
+            purpose: McpInventoryPurpose::McpList,
         });
+    }
+
+    /// Renders `/channels`: kicks off an MCP inventory fetch whose result is
+    /// rendered as the channel opt-in status listing.
+    pub(crate) fn add_channels_output(&mut self) {
+        self.flush_answer_stream_with_separator();
+        self.flush_active_cell();
+        self.transcript.active_cell = Some(Box::new(history_cell::new_mcp_inventory_loading(
+            self.config.animations,
+        )));
+        self.bump_active_cell_revision();
+        self.request_redraw();
+        self.app_event_tx.send(AppEvent::FetchMcpInventory {
+            detail: McpServerStatusDetail::ToolsAndAuthOnly,
+            thread_id: self.thread_id(),
+            purpose: McpInventoryPurpose::ChannelsStatus,
+        });
+    }
+
+    /// Renders the `/channels` status listing from fetched MCP statuses using
+    /// this session's requested entries and effective policy.
+    pub(crate) fn add_channels_status_output(
+        &mut self,
+        statuses: &[codex_app_server_protocol::McpServerStatus],
+    ) {
+        let cell = history_cell::new_channels_output(
+            &self.config.channels_entries,
+            &self.config.channels_policy,
+            statuses,
+        );
+        self.add_to_history(cell);
     }
 
     /// Remove the MCP loading spinner if it is still the active cell.

@@ -643,6 +643,7 @@ pub(crate) enum AppEvent {
     FetchMcpInventory {
         detail: McpServerStatusDetail,
         thread_id: Option<ThreadId>,
+        purpose: McpInventoryPurpose,
     },
 
     /// Result of fetching MCP inventory via app-server RPCs.
@@ -650,6 +651,7 @@ pub(crate) enum AppEvent {
         result: Result<Vec<McpServerStatus>, String>,
         detail: McpServerStatusDetail,
         thread_id: Option<ThreadId>,
+        purpose: McpInventoryPurpose,
     },
 
     /// Result of the startup skills refresh that runs after the first frame is scheduled.
@@ -1107,3 +1109,13 @@ pub(crate) enum FeedbackCategory {
     SafetyCheck,
     Other,
 }
+
+/// What a fetched MCP inventory will be rendered as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpInventoryPurpose {
+    /// The `/mcp` tools listing.
+    McpList,
+    /// The `/channels` opt-in status listing.
+    ChannelsStatus,
+}
+

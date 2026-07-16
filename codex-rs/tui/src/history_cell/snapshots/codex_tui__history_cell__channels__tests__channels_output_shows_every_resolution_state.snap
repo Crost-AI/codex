@@ -1,0 +1,15 @@
+---
+source: tui/src/history_cell/channels_tests.rs
+assertion_line: 66
+expression: render(&cell)
+---
+/channels
+
+📡  Channels
+
+  • server:discord — active
+    • discord (from config.toml (user); overrides definition from config.toml (project))
+      • declares codex/channel
+  • server:missing — matched no configured MCP server
+  • server:blocked — blocked (not in [channels] allowed)
+  • nonsense — invalid (channel entry `nonsense` is missing a `server:` or `plugin:` prefix)
