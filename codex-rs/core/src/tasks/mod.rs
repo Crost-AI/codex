@@ -521,6 +521,7 @@ impl Session {
         }
         if reason == TurnAbortReason::Interrupted && aborted_turn {
             self.maybe_start_turn_for_pending_work().await;
+            self.maybe_start_turn_for_channel_events().await;
         }
     }
 
@@ -560,6 +561,7 @@ impl Session {
 
         if reason == TurnAbortReason::Interrupted {
             self.maybe_start_turn_for_pending_work().await;
+            self.maybe_start_turn_for_channel_events().await;
         }
 
         true
@@ -825,6 +827,7 @@ impl Session {
         }
         if cleared_active_turn {
             self.maybe_start_turn_for_pending_work().await;
+            self.maybe_start_turn_for_channel_events().await;
         }
     }
 

@@ -57,6 +57,7 @@ use codex_protocol::protocol::McpStartupStatus;
 use codex_protocol::protocol::McpStartupUpdateEvent;
 use codex_rmcp_client::ExecutorStdioServerLauncher;
 use codex_rmcp_client::LocalStdioServerLauncher;
+use codex_rmcp_client::CustomNotificationHandler;
 use codex_rmcp_client::RmcpClient;
 use codex_rmcp_client::StdioServerLauncher;
 use codex_rmcp_client::ToolWithConnectorId;
@@ -113,6 +114,9 @@ pub(crate) struct ManagedClient {
     pub(crate) tool_timeout: Option<Duration>,
     pub(crate) server_instructions: Option<String>,
     pub(crate) server_supports_sandbox_state_meta_capability: bool,
+    /// Whether the server declared the experimental `codex/channel`
+    /// capability in its initialize result.
+    pub(crate) declares_channel_capability: bool,
     pub(crate) codex_apps_tools_cache_context: Option<ConnectorRuntimeContext<ToolInfo>>,
 }
 
@@ -286,6 +290,7 @@ struct ManagedClientStartup {
     runtime_auth_provider: Option<SharedAuthProvider>,
     client_elicitation_capability: ElicitationCapability,
     supports_openai_form_elicitation: bool,
+    channel_notification_handler: Option<CustomNotificationHandler>,
     cancel_token: CancellationToken,
     startup_complete: Arc<AtomicBool>,
 }
@@ -306,6 +311,7 @@ impl ManagedClientStartup {
             runtime_auth_provider,
             client_elicitation_capability,
             supports_openai_form_elicitation,
+            channel_notification_handler,
             cancel_token,
             startup_complete,
         } = self.clone();
@@ -368,6 +374,7 @@ impl ManagedClientStartup {
                         tool_catalog_fetch_ticket,
                         client_elicitation_capability,
                         supports_openai_form_elicitation,
+                        channel_notification_handler,
                     },
                 )
                 .await
@@ -433,6 +440,7 @@ impl AsyncManagedClient {
         runtime_auth_provider: Option<SharedAuthProvider>,
         client_elicitation_capability: ElicitationCapability,
         supports_openai_form_elicitation: bool,
+        channel_notification_handler: Option<CustomNotificationHandler>,
     ) -> Self {
         let is_codex_apps_mcp_server = server_name == CODEX_APPS_MCP_SERVER_NAME;
         let reconnect_server_name = server_name.clone();
@@ -463,6 +471,7 @@ impl AsyncManagedClient {
             runtime_auth_provider,
             client_elicitation_capability,
             supports_openai_form_elicitation,
+            channel_notification_handler,
             cancel_token: cancel_token.clone(),
             startup_complete: Arc::clone(&startup_complete),
         });
@@ -880,6 +889,7 @@ async fn start_server_task(
         tool_catalog_fetch_ticket,
         client_elicitation_capability,
         supports_openai_form_elicitation,
+        channel_notification_handler,
     } = params;
     let params = mcp_initialize_request_params(
         client_elicitation_capability,
@@ -888,7 +898,12 @@ async fn start_server_task(
     let send_elicitation = elicitation_requests.make_sender(server_name.clone(), tx_event);
 
     let initialize_result = client
-        .initialize(params, startup_timeout, send_elicitation)
+        .initialize(
+            params,
+            startup_timeout,
+            send_elicitation,
+            channel_notification_handler,
+        )
         .await
         .map_err(StartupOutcomeError::from)?;
 
@@ -910,6 +925,12 @@ async fn start_server_task(
         .experimental
         .as_ref()
         .and_then(|exp| exp.get(MCP_SANDBOX_STATE_META_CAPABILITY))
+        .is_some();
+    let declares_channel_capability = initialize_result
+        .capabilities
+        .experimental
+        .as_ref()
+        .and_then(|exp| exp.get(codex_channels::CHANNEL_CAPABILITY))
         .is_some();
     let list_start = Instant::now();
     let fetch_ticket = codex_apps_tools_cache_context
@@ -957,6 +978,7 @@ async fn start_server_task(
         tool_filter,
         server_instructions: initialize_result.instructions,
         server_supports_sandbox_state_meta_capability,
+        declares_channel_capability,
         codex_apps_tools_cache_context,
     };
 
@@ -1010,6 +1032,7 @@ struct StartServerTaskParams {
     tool_catalog_fetch_ticket: Option<McpToolCatalogFetchTicket>,
     client_elicitation_capability: ElicitationCapability,
     supports_openai_form_elicitation: bool,
+    channel_notification_handler: Option<CustomNotificationHandler>,
 }
 
 #[instrument(level = "trace", skip_all, fields(server_name = %server_name))]

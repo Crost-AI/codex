@@ -309,6 +309,11 @@ pub type SendElicitation = Box<
     dyn Fn(RequestId, Elicitation) -> BoxFuture<'static, Result<ElicitationResponse>> + Send + Sync,
 >;
 
+/// Handler invoked for custom (non-standard) server-to-client notifications,
+/// e.g. `notifications/codex/channel` pushed by channel servers.
+pub type CustomNotificationHandler =
+    Arc<dyn Fn(CustomNotification) -> BoxFuture<'static, ()> + Send + Sync>;
+
 pub struct ToolWithConnectorId {
     pub tool: Tool,
     pub connector_id: Option<String>,
@@ -432,11 +437,13 @@ impl RmcpClient {
         params: InitializeRequestParams,
         timeout: Option<Duration>,
         send_elicitation: SendElicitation,
+        custom_notification_handler: Option<CustomNotificationHandler>,
     ) -> Result<InitializeResult> {
         let client_service = ElicitationClientService::new(
             params.clone(),
             send_elicitation,
             self.elicitation_pause_state.clone(),
+            custom_notification_handler,
         );
         let pending_transport = {
             let mut guard = self.state.lock().await;

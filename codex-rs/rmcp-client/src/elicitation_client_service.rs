@@ -19,6 +19,7 @@ use serde_json::Map;
 use serde_json::Value;
 
 use crate::logging_client_handler::LoggingClientHandler;
+use crate::rmcp_client::CustomNotificationHandler;
 use crate::rmcp_client::Elicitation;
 use crate::rmcp_client::ElicitationPauseState;
 use crate::rmcp_client::ElicitationResponse;
@@ -42,6 +43,7 @@ pub(crate) struct ElicitationClientService {
     supports_openai_form: bool,
     send_elicitation: Arc<SendElicitation>,
     pause_state: ElicitationPauseState,
+    custom_notification_handler: Option<CustomNotificationHandler>,
 }
 
 impl ElicitationClientService {
@@ -49,6 +51,7 @@ impl ElicitationClientService {
         client_info: ClientInfo,
         send_elicitation: SendElicitation,
         pause_state: ElicitationPauseState,
+        custom_notification_handler: Option<CustomNotificationHandler>,
     ) -> Self {
         let supports_openai_form = client_info
             .capabilities
@@ -64,6 +67,7 @@ impl ElicitationClientService {
             supports_openai_form,
             send_elicitation,
             pause_state,
+            custom_notification_handler,
         }
     }
 
@@ -126,6 +130,12 @@ impl Service<RoleClient> for ElicitationClientService {
         notification: ServerNotification,
         context: NotificationContext<RoleClient>,
     ) -> Result<(), rmcp::ErrorData> {
+        if let ServerNotification::CustomNotification(custom) = &notification
+            && let Some(handler) = &self.custom_notification_handler
+        {
+            handler(custom.clone()).await;
+            return Ok(());
+        }
         <LoggingClientHandler as Service<RoleClient>>::handle_notification(
             &self.handler,
             notification,

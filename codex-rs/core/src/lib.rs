@@ -7,6 +7,7 @@
 
 mod apply_patch;
 mod apps;
+pub(crate) mod channels;
 mod client;
 mod client_common;
 mod realtime_context;

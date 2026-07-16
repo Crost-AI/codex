@@ -730,7 +730,7 @@ impl Session {
         let (
             thread_persistence_result,
             state_db_ctx,
-            (auth, mcp_projection, mcp_servers, tool_plugin_provenance),
+            (auth, mcp_projection, mut mcp_servers, tool_plugin_provenance),
         ) = tokio::join!(thread_persistence_fut, state_db_fut, auth_and_mcp_fut);
 
         let mut live_thread_init =
@@ -1058,6 +1058,7 @@ impl Session {
             }
 
             let services = SessionServices {
+                channel_hub: Arc::new(crate::channels::ChannelHub::new()),
                 // Initialize the MCP connection manager with an uninitialized
                 // instance. It will be replaced with one created via
                 // McpConnectionManager::new() once all its constructor args are
@@ -1218,6 +1219,21 @@ impl Session {
             let codex_apps_auth_manager =
                 codex_mcp::host_owned_codex_apps_enabled(&mcp_projection.config, auth)
                     .then(|| Arc::clone(&sess.services.auth_manager));
+            sess.services.channel_hub.configure(&config);
+            let channel_setup = sess
+                .services
+                .channel_hub
+                .refresh_setup(&tool_plugin_provenance, &mcp_servers);
+            crate::channels::apply_channel_env_overlay(
+                &mut mcp_servers,
+                &channel_setup.active_servers,
+                &config.codex_home.to_path_buf(),
+            );
+            sess.services.channel_hub.attach_session(&sess);
+            let channel_wiring = crate::channels::channel_wiring_for_hub(
+                &sess.services.channel_hub,
+                &channel_setup,
+            );
             let mcp_connection_manager = McpConnectionManager::new(
                 &mcp_servers,
                 config.mcp_oauth_credentials_store_mode,
@@ -1246,6 +1262,7 @@ impl Session {
                 Some(sess.mcp_elicitation_reviewer()),
                 Some(sess.mcp_elicitation_lifecycle()),
                 codex_mcp::ElicitationRequestRouter::default(),
+                channel_wiring,
             )
             .instrument(info_span!(
                 "session_init.mcp_manager_init",

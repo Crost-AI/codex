@@ -13,6 +13,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::channels::ChannelWiring;
 use crate::codex_apps::prepare_openai_file_params_for_model;
 use crate::elicitation::ElicitationRequestManager;
 use crate::elicitation::ElicitationRequestRouter;
@@ -148,6 +149,7 @@ impl McpConnectionManager {
         elicitation_reviewer: Option<ElicitationReviewerHandle>,
         elicitation_lifecycle: Option<crate::ElicitationLifecycle>,
         elicitation_router: ElicitationRequestRouter,
+        channel_wiring: Option<Arc<ChannelWiring>>,
     ) -> Self {
         let mut required_servers = mcp_servers
             .iter()
@@ -251,6 +253,9 @@ impl McpConnectionManager {
                 None
             };
             let has_runtime_auth = runtime_auth_provider.is_some();
+            let channel_notification_handler = channel_wiring
+                .as_ref()
+                .and_then(|wiring| wiring.handler_for(&server_name));
             let async_managed_client = AsyncManagedClient::new(
                 server_name.clone(),
                 startup_submit_id.clone(),
@@ -268,6 +273,7 @@ impl McpConnectionManager {
                 runtime_auth_provider,
                 client_elicitation_capability.clone(),
                 supports_openai_form_elicitation,
+                channel_notification_handler,
             );
             clients.insert(server_name.clone(), async_managed_client.clone());
             let tx_event = tx_event.clone();
@@ -928,6 +934,21 @@ impl McpConnectionManager {
             .read_resource(params, timeout)
             .await
             .with_context(|| format!("resources/read failed for `{server}` ({uri})"))
+    }
+
+    /// Returns, for each connected server, whether it declared the
+    /// experimental `codex/channel` capability during initialization.
+    /// Servers whose startup failed (or is still pending after failure) are
+    /// omitted.
+    pub async fn list_channel_capabilities(&self) -> HashMap<String, bool> {
+        let mut capabilities = HashMap::new();
+        for (server_name, client) in &self.clients {
+            if let Ok(managed_client) = client.client().await {
+                capabilities
+                    .insert(server_name.clone(), managed_client.declares_channel_capability);
+            }
+        }
+        capabilities
     }
 
     /// Returns presentation metadata from the current connection.

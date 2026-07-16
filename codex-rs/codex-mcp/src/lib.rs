@@ -1,3 +1,5 @@
+pub use channels::ChannelEventSink;
+pub use channels::ChannelWiring;
 pub use connection_manager::McpConnectionManager;
 pub use connection_manager::tool_is_model_visible;
 pub use elicitation::ElicitationLifecycle;
@@ -82,6 +84,7 @@ pub use mcp::qualified_mcp_tool_name_prefix;
 
 pub(crate) mod auth_elicitation;
 mod catalog;
+mod channels;
 pub(crate) mod codex_apps;
 pub(crate) mod connection_manager;
 pub(crate) mod elicitation;

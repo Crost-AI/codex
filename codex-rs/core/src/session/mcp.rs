@@ -385,7 +385,18 @@ impl Session {
         } = mcp_projection;
         let mcp_config = Arc::new(mcp_config);
         let tool_plugin_provenance = codex_mcp::tool_plugin_provenance(&mcp_config);
-        let mcp_servers = effective_mcp_servers(&mcp_config, auth.as_ref());
+        let mut mcp_servers = effective_mcp_servers(&mcp_config, auth.as_ref());
+        let channel_setup = self
+            .services
+            .channel_hub
+            .refresh_setup(&tool_plugin_provenance, &mcp_servers);
+        crate::channels::apply_channel_env_overlay(
+            &mut mcp_servers,
+            &channel_setup.active_servers,
+            &mcp_config.codex_home,
+        );
+        let channel_wiring =
+            crate::channels::channel_wiring_for_hub(&self.services.channel_hub, &channel_setup);
         let environment_manager = self.services.turn_environments.environment_manager();
         // TODO(anp): Migrate MCP runtime cwd plumbing to PathUri so foreign environment cwd
         // values can be used without falling back to the legacy host cwd.
@@ -435,6 +446,7 @@ impl Session {
             elicitation_reviewer,
             Some(self.mcp_elicitation_lifecycle()),
             current_runtime.manager().elicitation_router(),
+            channel_wiring,
         )
         .await;
         refreshed_manager

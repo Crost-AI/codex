@@ -426,6 +426,21 @@ impl ResolvedMcpCatalog {
     pub fn conflicts(&self) -> &[McpServerConflict] {
         &self.conflicts
     }
+
+    /// Returns the sources of every registration recorded for `name` in
+    /// ascending precedence order (the winning registration last). Removals
+    /// are excluded. Useful for showing which definition of a same-named
+    /// server won and which were overridden.
+    pub fn registration_sources_for(&self, name: &str) -> Vec<McpServerSource> {
+        self.actions
+            .iter()
+            .filter(|action| action.name() == name)
+            .filter_map(|action| match action {
+                CatalogAction::Register(registration) => Some(registration.source.clone()),
+                CatalogAction::Remove { .. } => None,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

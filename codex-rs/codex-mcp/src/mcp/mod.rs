@@ -337,6 +337,7 @@ pub async fn read_mcp_resource(
         /*elicitation_reviewer*/ None,
         /*elicitation_lifecycle*/ None,
         crate::elicitation::ElicitationRequestRouter::default(),
+        /*channel_wiring*/ None,
     )
     .await;
 
@@ -417,6 +418,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
         /*elicitation_reviewer*/ None,
         /*elicitation_lifecycle*/ None,
         crate::elicitation::ElicitationRequestRouter::default(),
+        /*channel_wiring*/ None,
     )
     .await;
 
