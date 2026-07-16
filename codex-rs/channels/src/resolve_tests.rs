@@ -9,7 +9,7 @@ use super::resolve_channels;
 use crate::policy::ChannelsPolicy;
 
 fn servers(names: &[&str]) -> BTreeSet<String> {
-    names.iter().map(|name| name.to_string()).collect()
+    names.iter().map(ToString::to_string).collect()
 }
 
 #[test]

@@ -90,10 +90,13 @@ fn resolve_entry(
         return ChannelResolutionState::NotAllowed;
     }
     let servers: Vec<String> = match &spec {
-        ChannelSpec::Server(name) => configured_servers
-            .contains(name)
-            .then(|| vec![name.clone()])
-            .unwrap_or_default(),
+        ChannelSpec::Server(name) => {
+            if configured_servers.contains(name) {
+                vec![name.clone()]
+            } else {
+                Vec::new()
+            }
+        }
         ChannelSpec::Plugin(id) => plugin_ids_by_server
             .iter()
             .filter(|(server, plugin_id)| *plugin_id == id && configured_servers.contains(*server))
