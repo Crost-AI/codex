@@ -2313,6 +2313,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-channels"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "codex-rmcp-client",
+ "codex-utils-cargo-bin",
+ "futures",
+ "pretty_assertions",
+ "rmcp",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "codex-chatgpt"
 version = "0.0.0"
 dependencies = [
@@ -2658,6 +2673,7 @@ dependencies = [
  "codex-app-server-protocol",
  "codex-apply-patch",
  "codex-async-utils",
+ "codex-channels",
  "codex-code-mode",
  "codex-config",
  "codex-connectors",
@@ -3386,6 +3402,7 @@ dependencies = [
  "async-channel",
  "codex-api",
  "codex-async-utils",
+ "codex-channels",
  "codex-config",
  "codex-connectors",
  "codex-exec-server",
