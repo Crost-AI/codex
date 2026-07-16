@@ -65,6 +65,14 @@ pub struct McpServerStatus {
     pub resources: Vec<McpResource>,
     pub resource_templates: Vec<McpResourceTemplate>,
     pub auth_status: McpAuthStatus,
+    /// Human-readable source of the winning server definition (e.g.
+    /// "config.toml (user)" or "plugin `acme`"). Null when unknown.
+    pub source: Option<String>,
+    /// Sources of same-name definitions that lost to the winning one.
+    pub overridden_sources: Vec<String>,
+    /// Whether the connected server declared the experimental `codex/channel`
+    /// capability. Null while the server has not (yet) initialized.
+    pub declares_channel_capability: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

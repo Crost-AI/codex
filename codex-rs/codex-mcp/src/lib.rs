@@ -59,8 +59,10 @@ pub use plugin_config::PluginMcpServerParseError;
 pub use plugin_config::parse_executor_plugin_mcp_config;
 pub use plugin_config::parse_plugin_mcp_config;
 
+pub use mcp::McpServerSourceInfo;
 pub use mcp::McpServerStatusSnapshot;
 pub use mcp::McpSnapshotDetail;
+pub use mcp::mcp_server_sources;
 pub use mcp::collect_mcp_server_status_snapshot_with_detail;
 pub use mcp::read_mcp_resource;
 

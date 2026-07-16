@@ -2175,6 +2175,9 @@ fn mcp_server_status_serializes_absent_server_info_as_null() {
             resources: Vec::new(),
             resource_templates: Vec::new(),
             auth_status: McpAuthStatus::Unsupported,
+            source: None,
+            overridden_sources: Vec::new(),
+            declares_channel_capability: None,
         }],
         next_cursor: None,
     };
@@ -2189,6 +2192,9 @@ fn mcp_server_status_serializes_absent_server_info_as_null() {
                 "resources": [],
                 "resourceTemplates": [],
                 "authStatus": "unsupported",
+                "source": null,
+                "overriddenSources": [],
+                "declaresChannelCapability": null,
             }],
             "nextCursor": null,
         })
@@ -2267,6 +2273,9 @@ fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
             resources: Vec::new(),
             resource_templates: Vec::new(),
             auth_status: McpAuthStatus::Unsupported,
+            source: None,
+            overridden_sources: Vec::new(),
+            declares_channel_capability: None,
         }],
         next_cursor: None,
     };
@@ -2288,6 +2297,9 @@ fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
                 "resources": [],
                 "resourceTemplates": [],
                 "authStatus": "unsupported",
+                "source": null,
+                "overriddenSources": [],
+                "declaresChannelCapability": null,
             }],
             "nextCursor": null,
         })
