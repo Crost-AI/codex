@@ -388,11 +388,11 @@ async function main() {
       clientInfo: { name: "e2e-test", version: "0.0.0" },
     });
     assert.ok(init.result.capabilities.experimental["codex/channel"], "codex/channel capability");
-    assert.equal(init.result.serverInfo.version, "1.2.0");
+    assert.equal(init.result.serverInfo.version, "1.3.0");
     assert.ok(init.result.instructions.includes("send_message"));
     assert.ok(init.result.instructions.includes("loop forever"));
-    await client.waitForStderr("discord-channel bridge v1.2.0 starting");
-    pass("initialize declares codex/channel, version 1.2.0, and instructions");
+    await client.waitForStderr("discord-channel bridge v1.3.0 starting");
+    pass("initialize declares codex/channel, version 1.3.0, and instructions");
 
     // 2. tools/list returns exactly the three tools.
     client.notify("notifications/initialized", {});
@@ -804,6 +804,68 @@ async function main() {
       child2.kill("SIGKILL");
       gateway2.close();
       rest2.close();
+    }
+
+    // ── Phase 3: mention requirement OFF — addressed-awareness. ──
+    const gateway3 = new MockGateway();
+    const rest3 = new MockRest();
+    const gwPort3 = await gateway3.listen();
+    const restPort3 = await rest3.listen();
+    const child3 = spawn(process.execPath, [BRIDGE], {
+      env: {
+        ...process.env,
+        DISCORD_BOT_TOKEN: "test-token",
+        DISCORD_ALLOWED_USER_IDS: "111",
+        DISCORD_REQUIRE_MENTION: "false",
+        DISCORD_MENTION_WINDOW_SECONDS: "0",
+        DISCORD_GATEWAY_URL: `ws://127.0.0.1:${gwPort3}`,
+        DISCORD_API_BASE: `http://127.0.0.1:${restPort3}`,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const client3 = new BridgeClient(child3);
+    try {
+      await client3.request("initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "e2e-test-3", version: "0.0.0" },
+      });
+      client3.notify("notifications/initialized", {});
+      await gateway3.waitForConnection();
+      gateway3.send({ op: 10, d: { heartbeat_interval: 200 } });
+      await gateway3.waitForFrame((f) => f.op === 2, 5000, "IDENTIFY (bridge3)");
+      gateway3.send({
+        op: 0, s: 1, t: "READY",
+        d: { session_id: "sess3", resume_gateway_url: "", user: { id: "999", username: "testbot" } },
+      });
+      await client3.waitForStderr("logged in as testbot");
+
+      // 22. Open chatter flows with addressed="none"; @someone-else flows
+      // with addressed="other"; @bot carries no addressed attribute.
+      const room = { guild_id: "GUILD", channel_id: "G5" };
+      gateway3.send({
+        op: 0, s: 2, t: "MESSAGE_CREATE",
+        d: { id: "N1", ...room, content: "thinking out loud", author: { id: "111", username: "karl" }, mentions: [] },
+      });
+      const n1 = await client3.waitForNotification();
+      assert.equal(n1.params.meta.addressed, "none");
+      gateway3.send({
+        op: 0, s: 3, t: "MESSAGE_CREATE",
+        d: { id: "N2", ...room, content: "<@555> your turn", author: { id: "111", username: "karl" }, mentions: [{ id: "555" }] },
+      });
+      const n2 = await client3.waitForNotification();
+      assert.equal(n2.params.meta.addressed, "other");
+      gateway3.send({
+        op: 0, s: 4, t: "MESSAGE_CREATE",
+        d: { id: "N3", ...room, content: "<@999> and you?", author: { id: "111", username: "karl" }, mentions: [{ id: "999" }] },
+      });
+      const n3 = await client3.waitForNotification();
+      assert.equal(n3.params.meta.addressed, undefined);
+      pass("mention-free mode marks addressed=none/other and leaves bot-directed unmarked");
+    } finally {
+      child3.kill("SIGKILL");
+      gateway3.close();
+      rest3.close();
     }
 
     // 15. Closing stdin shuts the bridge down cleanly.

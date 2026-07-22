@@ -16,7 +16,7 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 
 // BRIDGE_VERSION: bump on every bridge change.
-const BRIDGE_VERSION = "1.2.0";
+const BRIDGE_VERSION = "1.3.0";
 
 // Discord's upload limit for bots without guild boosts.
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -53,7 +53,14 @@ normal file tools.
 Messages marked bot="true" come from another bot. Reply tersely, and only when
 a reply moves the work forward. NEVER @mention a bot back in a mere
 acknowledgement — two agents that mention each other on every message will
-loop forever.`;
+loop forever.
+
+Messages carrying addressed="other" (someone else was mentioned or replied
+to) or addressed="none" (open channel chatter) were NOT directed at you:
+read them for context and exercise judgment — stay silent unless you can
+correct a clear factual error, something urgent needs attention, or the
+conversation genuinely needs you. Never join another exchange just to
+acknowledge it.`;
 
 // ---------------------------------------------------------------------------
 // Logging (stderr only; stdout is the MCP transport)
@@ -1018,24 +1025,36 @@ async function handleMessageCreate(d) {
   // 2. Room gates (all silent drops).
   const isDm = !d.guild_id;
   const channelId = String(d.channel_id ?? "");
+  // Who the message was directed at: "you" (the bot — via DM, mention,
+  // reply, or the continuation window), "other" (someone else was mentioned
+  // or replied to), or "none" (open channel chatter). With the mention
+  // requirement off, other/none messages still flow — the meta attribute
+  // lets the agent read them for context while holding off on replies.
+  let addressed = "you";
   if (isDm) {
     if (!config.allowDms) return;
   } else {
     if (!(await guildChannelAllowed(channelId))) return;
-    if (config.requireMention) {
-      // "Addressed to the bot" = a user/role mention, a Discord reply to one
-      // of the bot's messages, or a continuation from a sender whose message
-      // was forwarded within the window (split content only mentions in its
-      // first chunk).
-      const mentioned = (d.mentions ?? []).some((m) => m?.id === gateway.selfId);
-      const botRoleId = gateway.botRoleByGuild.get(d.guild_id);
-      const roleMentioned = botRoleId ? (d.mention_roles ?? []).includes(botRoleId) : false;
-      const replyToBot = d.referenced_message?.author?.id === gateway.selfId;
-      const withinWindow =
-        config.mentionWindowMs > 0 &&
-        Date.now() - (gateway.lastForwardedAt.get(`${channelId}:${authorId}`) ?? 0) <=
-          config.mentionWindowMs;
-      if (!mentioned && !roleMentioned && !replyToBot && !withinWindow) return;
+    // "Addressed to the bot" = a user/role mention, a Discord reply to one
+    // of the bot's messages, or a continuation from a sender whose message
+    // was forwarded within the window (split content only mentions in its
+    // first chunk).
+    const mentioned = (d.mentions ?? []).some((m) => m?.id === gateway.selfId);
+    const botRoleId = gateway.botRoleByGuild.get(d.guild_id);
+    const roleMentioned = botRoleId ? (d.mention_roles ?? []).includes(botRoleId) : false;
+    const replyToBot = d.referenced_message?.author?.id === gateway.selfId;
+    const withinWindow =
+      config.mentionWindowMs > 0 &&
+      Date.now() - (gateway.lastForwardedAt.get(`${channelId}:${authorId}`) ?? 0) <=
+        config.mentionWindowMs;
+    const directedAtBot = mentioned || roleMentioned || replyToBot || withinWindow;
+    if (config.requireMention && !directedAtBot) return;
+    if (!directedAtBot) {
+      const mentionsSomeoneElse =
+        (d.mentions ?? []).length > 0 ||
+        (d.mention_roles ?? []).length > 0 ||
+        Boolean(d.referenced_message);
+      addressed = mentionsSomeoneElse ? "other" : "none";
     }
   }
 
@@ -1078,6 +1097,8 @@ async function handleMessageCreate(d) {
     meta.dm = "true";
   }
   if (author.bot === true) meta.bot = "true";
+  // Present only when the message was NOT directed at the bot.
+  if (addressed !== "you") meta.addressed = addressed;
 
   // Sliding continuation window: any forwarded message keeps this sender's
   // floor open in this channel.

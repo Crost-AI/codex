@@ -86,6 +86,7 @@ All configuration is environment variables (usually via the `.env` file):
 | `DISCORD_ALLOW_DMS` | no | `true` | Set to `false` to ignore direct messages. |
 | `DISCORD_CHANNEL_IDS` | no | all channels | Comma-separated channel ids; guild messages outside them are ignored. Threads inherit their **parent** channel's allowlist (tracked from gateway events, with a REST fallback). |
 | `DISCORD_REQUIRE_MENTION` | no | `true` | Guild messages must be addressed to the bot: an @mention (user or its managed role), a Discord **reply** to one of the bot's messages, or a message inside the continuation window below. Set to `false` to forward all allowed guild messages. |
+| — listening mode | | | With `DISCORD_REQUIRE_MENTION=false`, messages not directed at the bot carry `addressed="other"` (someone else was mentioned/replied to) or `addressed="none"` (open chatter); the agent is instructed to read them for context and stay silent unless correcting a clear factual error or something urgent. Pair with `DISCORD_CHANNEL_IDS`. |
 | `DISCORD_MENTION_WINDOW_SECONDS` | no | `60` | Sliding continuation window: after a sender's message is forwarded, their follow-ups in the same channel pass the mention gate for this long. Covers content split by the 2000-char limit (only the first chunk carries the mention). `0` disables. |
 | `DISCORD_ATTACHMENT_HOSTS` | no | Discord CDN hosts | Hosts `read_attachment` may fetch from (used by the e2e test). |
 | `DISCORD_GATEWAY_URL` | no | `wss://gateway.discord.gg` | Gateway override (used by the e2e test). |
