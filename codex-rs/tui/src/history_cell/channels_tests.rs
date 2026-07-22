@@ -20,7 +20,7 @@ fn status(
         resource_templates: Vec::new(),
         auth_status: McpAuthStatus::Unsupported,
         source: source.map(str::to_string),
-        overridden_sources: overridden_sources.iter().map(|s| s.to_string()).collect(),
+        overridden_sources: overridden_sources.iter().map(ToString::to_string).collect(),
         declares_channel_capability,
     }
 }

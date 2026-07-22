@@ -74,7 +74,7 @@ pub(crate) fn new_channels_output(
                 (format!("invalid ({error})").red(), Vec::new())
             }
             ChannelResolutionState::NoMatchingServer => {
-                ("matched no configured MCP server".yellow(), Vec::new())
+                ("matched no configured MCP server".red(), Vec::new())
             }
         };
         lines.push(
@@ -112,7 +112,7 @@ pub(crate) fn new_channels_output(
                 Some(true) => "      • declares codex/channel".green().into(),
                 Some(false) => {
                     "      • connected but does NOT declare the codex/channel capability"
-                        .yellow()
+                        .red()
                         .into()
                 }
                 None => "      • not connected yet (capability unknown)".dim().into(),
