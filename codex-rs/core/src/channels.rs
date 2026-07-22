@@ -17,6 +17,7 @@ use std::sync::OnceLock;
 use std::sync::Weak;
 
 use codex_channels::BoundedEventQueue;
+use codex_channels::CHANNEL_EVENT_PREAMBLE;
 use codex_channels::CHANNEL_EVENT_SEPARATOR;
 use codex_channels::ChannelEvent;
 use codex_channels::ChannelSetup;
@@ -210,7 +211,10 @@ impl Session {
             self.clear_reserved_idle_turn_for_channels().await;
             return;
         }
-        let text = events.join(CHANNEL_EVENT_SEPARATOR);
+        let text = format!(
+            "{CHANNEL_EVENT_PREAMBLE}\n\n{}",
+            events.join(CHANNEL_EVENT_SEPARATOR)
+        );
         let input = vec![TurnInput::UserInput {
             content: vec![UserInput::Text {
                 text,
