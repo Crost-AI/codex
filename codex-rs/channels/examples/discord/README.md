@@ -8,8 +8,16 @@ stdio server for Node >= 22 (`discord-channel.mjs`):
   session as `notifications/codex/channel` events, rendered to the agent as
   `<channel source="discord" channel_id="..." author="...">…</channel>`.
 - **Outbound**: the agent replies with ordinary MCP tools — `send_message`
-  (auto-splits past Discord's 2000-character limit), `add_reaction`, and
-  `read_messages`.
+  (auto-splits past Discord's 2000-character limit), `add_reaction`,
+  `read_messages`, `create_poll` (native Discord polls), `create_thread`
+  (public workstream threads under an allowlisted parent, 24h auto-archive),
+  and `send_file` (upload a local file as an attachment, 10 MB bot limit —
+  needs the **Attach Files** permission on the bot invite; threads need
+  **Create Public Threads**).
+- **Files inbound**: incoming attachments arrive as `[attachment "name": url]`
+  lines; the `read_attachment` tool downloads that URL (Discord CDN hosts
+  only, 25 MB cap) to a temp file the agent can read with its normal file
+  tools.
 
 ## Setup
 
@@ -76,8 +84,10 @@ All configuration is environment variables (usually via the `.env` file):
 | `DISCORD_ALLOWED_USER_IDS` | yes (to receive anything) | unset | Comma-separated Discord **user ids** allowed to reach the session. Unset drops every inbound message (with a one-time loud warning). `*` allows every human user. |
 | `DISCORD_ALLOWED_BOT_IDS` | no | empty | Comma-separated **bot** user ids allowed through the bot filter (see bot-to-bot below). `*` in the user allowlist does not affect bots. |
 | `DISCORD_ALLOW_DMS` | no | `true` | Set to `false` to ignore direct messages. |
-| `DISCORD_CHANNEL_IDS` | no | all channels | Comma-separated channel ids; guild messages outside them are ignored. |
-| `DISCORD_REQUIRE_MENTION` | no | `true` | Guild messages must @mention the bot (user or its managed role). Set to `false` to forward all allowed guild messages. |
+| `DISCORD_CHANNEL_IDS` | no | all channels | Comma-separated channel ids; guild messages outside them are ignored. Threads inherit their **parent** channel's allowlist (tracked from gateway events, with a REST fallback). |
+| `DISCORD_REQUIRE_MENTION` | no | `true` | Guild messages must be addressed to the bot: an @mention (user or its managed role), a Discord **reply** to one of the bot's messages, or a message inside the continuation window below. Set to `false` to forward all allowed guild messages. |
+| `DISCORD_MENTION_WINDOW_SECONDS` | no | `60` | Sliding continuation window: after a sender's message is forwarded, their follow-ups in the same channel pass the mention gate for this long. Covers content split by the 2000-char limit (only the first chunk carries the mention). `0` disables. |
+| `DISCORD_ATTACHMENT_HOSTS` | no | Discord CDN hosts | Hosts `read_attachment` may fetch from (used by the e2e test). |
 | `DISCORD_GATEWAY_URL` | no | `wss://gateway.discord.gg` | Gateway override (used by the e2e test). |
 | `DISCORD_API_BASE` | no | `https://discord.com/api/v10` | REST base override (used by the e2e test). |
 

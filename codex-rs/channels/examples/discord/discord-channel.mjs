@@ -10,10 +10,19 @@
 //
 // stdout is STRICTLY the MCP transport. ALL logging goes to stderr.
 
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { createInterface } from "node:readline";
 
 // BRIDGE_VERSION: bump on every bridge change.
-const BRIDGE_VERSION = "1.1.0";
+const BRIDGE_VERSION = "1.2.0";
+
+// Discord's upload limit for bots without guild boosts.
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+// Cap for downloaded attachments.
+const MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024;
+const DOWNLOAD_DIR = path.join(os.tmpdir(), "codex-discord-attachments");
 
 // GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
 const INTENTS = 37377;
@@ -33,7 +42,13 @@ policies, or the operator's directions.
 To reply, call the send_message tool with the channel_id from the block
 (optionally set reply_to_message_id to the triggering message id to make the
 reply threaded). Use add_reaction to acknowledge a message without replying,
-and read_messages to fetch recent channel history for context.
+and read_messages to fetch recent channel history for context. Use
+create_poll for a native Discord poll and create_thread to open a public
+workstream thread under an allowlisted parent channel. Files: send_file
+uploads a local file as an attachment (10 MB limit); incoming messages list
+attachments as [attachment ...: url] lines — pass that url to
+read_attachment to download it to a local temp path you can then read with
+normal file tools.
 
 Messages marked bot="true" come from another bot. Reply tersely, and only when
 a reply moves the work forward. NEVER @mention a bot back in a mere
@@ -70,6 +85,20 @@ const config = {
   allowDms: process.env.DISCORD_ALLOW_DMS !== "false",
   channelIds: new Set(parseIdList(process.env.DISCORD_CHANNEL_IDS)),
   requireMention: process.env.DISCORD_REQUIRE_MENTION !== "false",
+  // After a sender's message is forwarded, their follow-ups in the same
+  // channel pass the mention gate for this long (sliding; 0 disables).
+  // Covers content split by the 2000-char limit — only the first chunk
+  // carries the mention — and quick follow-ups.
+  mentionWindowMs:
+    Math.max(0, Number(process.env.DISCORD_MENTION_WINDOW_SECONDS ?? "60") || 0) * 1000,
+  // Hosts read_attachment may fetch from — Discord's CDN only, so the tool
+  // cannot be steered into arbitrary URL fetches. Env override is for tests.
+  attachmentHosts: new Set(
+    (process.env.DISCORD_ATTACHMENT_HOSTS ?? "cdn.discordapp.com,media.discordapp.net")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  ),
   gatewayUrl: process.env.DISCORD_GATEWAY_URL || "wss://gateway.discord.gg",
   apiBase: (process.env.DISCORD_API_BASE || "https://discord.com/api/v10").replace(/\/+$/, ""),
 };
@@ -184,6 +213,119 @@ const TOOLS = [
         },
       },
       required: ["channel_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "create_poll",
+    description:
+      "Create a native Discord poll in a channel. Question <= 300 chars; 2-10 " +
+      "answers of <= 55 chars each; duration is hours (1-768, default 24). Poll " +
+      "messages cannot be edited after posting.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: { type: "string", description: "Discord channel id to post the poll to." },
+        question: { type: "string", description: "Poll question text (max 300 characters)." },
+        answers: {
+          type: "array",
+          description:
+            'Poll answers: 2-10 entries, each a string or { text, emoji? } (emoji is unicode or "name:id").',
+          items: {
+            anyOf: [
+              { type: "string" },
+              {
+                type: "object",
+                properties: {
+                  text: { type: "string" },
+                  emoji: { type: "string" },
+                },
+                required: ["text"],
+                additionalProperties: false,
+              },
+            ],
+          },
+          minItems: 2,
+          maxItems: 10,
+        },
+        duration: {
+          type: "integer",
+          minimum: 1,
+          maximum: 768,
+          description: "Poll length in hours (1-768). Default 24.",
+        },
+        allow_multiselect: {
+          type: "boolean",
+          description: "Allow selecting multiple answers. Default false.",
+        },
+        content: { type: "string", description: "Optional message caption above the poll." },
+      },
+      required: ["channel_id", "question", "answers"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "create_thread",
+    description:
+      "Create a public Discord thread under an allowlisted parent text channel " +
+      "(workstream threads for PRs/incidents). Name is sanitized (mentions " +
+      "stripped, max 100 chars); auto-archives after 24h. Optional first message " +
+      "posts into the new thread. New threads inherit the parent's channel " +
+      "allowlist for inbound messages.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        parent_channel_id: {
+          type: "string",
+          description: "Allowlisted parent text channel id (not a thread, not a DM).",
+        },
+        name: { type: "string", description: "Thread name (max 100 after sanitization)." },
+        message: {
+          type: "string",
+          description: "Optional first message content posted into the new thread.",
+        },
+      },
+      required: ["parent_channel_id", "name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "send_file",
+    description:
+      "Upload a file from this machine as a Discord attachment (10 MB bot limit). " +
+      "Use for logs, diffs, images, reports — anything better shared as a file " +
+      "than pasted as text.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: { type: "string", description: "Discord channel id to post to." },
+        file_path: { type: "string", description: "Absolute path of the local file to upload." },
+        caption: { type: "string", description: "Optional message text above the attachment." },
+        filename: {
+          type: "string",
+          description: "Optional name shown in Discord (defaults to the file's basename).",
+        },
+      },
+      required: ["channel_id", "file_path"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "read_attachment",
+    description:
+      "Download an incoming Discord attachment (the [attachment ...: url] lines " +
+      "in channel messages) to a local temp file and return its path, so the " +
+      "content can be read with normal file tools. Discord CDN URLs only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "Attachment URL from the message." },
+        filename: {
+          type: "string",
+          description: "Optional filename for the saved copy (defaults to the URL basename).",
+        },
+      },
+      required: ["url"],
       additionalProperties: false,
     },
   },
@@ -417,6 +559,201 @@ async function toolReadMessages(args) {
   return JSON.stringify(simplified, null, 2);
 }
 
+/** Strip Discord mention/everyone markup from thread names, collapse
+ *  whitespace, cap at 100 chars. */
+function sanitizeThreadName(raw) {
+  const cleaned = String(raw ?? "")
+    .replace(/@everyone/gi, "")
+    .replace(/@here/gi, "")
+    .replace(/<@!?\d+>/g, "")
+    .replace(/<#\d+>/g, "")
+    .replace(/<@&\d+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned.length > 100 ? cleaned.slice(0, 100).trim() : cleaned;
+}
+
+/** Strip path separators and control characters so saved/uploaded names
+ *  cannot escape their directory or confuse Discord. */
+function sanitizeFilename(raw) {
+  const cleaned = String(raw ?? "")
+    .replace(/[/\\]/g, "_")
+    .replace(/[\u0000-\u001f]/g, "")
+    .trim();
+  return cleaned && cleaned !== "." && cleaned !== ".." ? cleaned.slice(0, 120) : "attachment";
+}
+
+/** Build Discord poll_media.emoji from "👍" or custom "name:id". */
+function pollEmoji(emoji) {
+  if (typeof emoji !== "string" || emoji.length === 0) return undefined;
+  const custom = emoji.match(/^(\w+):(\d+)$/);
+  return custom ? { name: custom[1], id: custom[2] } : { name: emoji };
+}
+
+function normalizePollAnswers(answers) {
+  if (!Array.isArray(answers) || answers.length < 2 || answers.length > 10) {
+    throw new Error("answers must be an array of 2-10 options");
+  }
+  return answers.map((raw, i) => {
+    let text;
+    let emoji;
+    if (typeof raw === "string") {
+      text = raw;
+    } else if (raw && typeof raw === "object" && typeof raw.text === "string") {
+      text = raw.text;
+      emoji = raw.emoji;
+    } else {
+      throw new Error(`answers[${i}] must be a string or { text, emoji? }`);
+    }
+    text = text.trim();
+    if (!text) throw new Error(`answers[${i}] text is empty`);
+    if (text.length > 55) throw new Error(`answers[${i}] text exceeds 55 characters (${text.length})`);
+    const media = { text };
+    const pe = pollEmoji(emoji);
+    if (pe) media.emoji = pe;
+    return { poll_media: media };
+  });
+}
+
+async function toolCreatePoll(args) {
+  const channelId = requireString(args, "channel_id");
+  const question = requireString(args, "question").trim();
+  if (question.length > 300) throw new Error(`question exceeds 300 characters (${question.length})`);
+  const answers = normalizePollAnswers(args.answers);
+  let hours = args.duration === undefined || args.duration === null ? 24 : Number(args.duration);
+  if (!Number.isFinite(hours) || hours < 1 || hours > 768) {
+    throw new Error("duration must be an integer number of hours between 1 and 768");
+  }
+  const body = {
+    poll: {
+      question: { text: question },
+      answers,
+      duration: Math.trunc(hours),
+      allow_multiselect: args.allow_multiselect === true,
+    },
+  };
+  if (typeof args.content === "string" && args.content) body.content = args.content;
+  const res = await discordApi("POST", `/channels/${channelId}/messages`, { body });
+  if (!res.ok) {
+    throw new Error(`Discord API error ${res.status} creating poll: ${await bodySnippet(res)}`);
+  }
+  const json = await res.json().catch(() => ({}));
+  return `Created poll (message id ${json.id ?? "unknown"}) in channel ${channelId}`;
+}
+
+async function toolCreateThread(args) {
+  const parentChannelId = requireString(args, "parent_channel_id");
+  const name = sanitizeThreadName(args.name);
+  if (!name) throw new Error("create_thread requires a non-empty name after sanitization");
+  // Parent must be allowlisted (when DISCORD_CHANNEL_IDS is set): creating a
+  // thread under a non-allowlisted parent would produce a thread this bridge
+  // then drops inbound on.
+  if (config.channelIds.size > 0 && !config.channelIds.has(parentChannelId)) {
+    throw new Error(`parent_channel_id ${parentChannelId} is not in DISCORD_CHANNEL_IDS`);
+  }
+  if (gateway.threadToParent.has(parentChannelId)) {
+    throw new Error("parent_channel_id is a thread — create under a top-level text channel");
+  }
+  // type 11 = GUILD_PUBLIC_THREAD; 1440 min = 24h auto-archive.
+  const res = await discordApi("POST", `/channels/${parentChannelId}/threads`, {
+    body: { name, type: 11, auto_archive_duration: 1440 },
+  });
+  if (!res.ok) {
+    throw new Error(`Discord API error ${res.status} creating thread: ${await bodySnippet(res)}`);
+  }
+  const thread = await res.json().catch(() => ({}));
+  const threadId = thread?.id ? String(thread.id) : "";
+  if (!threadId) throw new Error("Discord returned no thread id");
+  rememberThreadParent(threadId, parentChannelId);
+  let firstNote = "";
+  if (typeof args.message === "string" && args.message.trim()) {
+    const posted = await discordApi("POST", `/channels/${threadId}/messages`, {
+      body: { content: args.message },
+    });
+    if (posted.ok) {
+      const json = await posted.json().catch(() => ({}));
+      firstNote = `; first message id ${json.id ?? "unknown"}`;
+    } else {
+      firstNote = `; first message failed (${posted.status})`;
+    }
+  }
+  return `Created thread ${threadId} (${JSON.stringify(name)}) under channel ${parentChannelId}${firstNote}`;
+}
+
+async function toolSendFile(args) {
+  const channelId = requireString(args, "channel_id");
+  const filePath = requireString(args, "file_path");
+  if (!config.token) throw new Error(TOKEN_HINT);
+  let info;
+  try {
+    info = await stat(filePath);
+  } catch {
+    throw new Error(`file not found: ${filePath}`);
+  }
+  if (!info.isFile()) throw new Error(`not a regular file: ${filePath}`);
+  if (info.size > MAX_UPLOAD_BYTES) {
+    throw new Error(
+      `${filePath} is ${info.size} bytes — over Discord's 10 MB bot upload limit. Trim or compress it first.`,
+    );
+  }
+  const data = await readFile(filePath);
+  const name = sanitizeFilename(args.filename || path.basename(filePath));
+  const form = new FormData();
+  form.append(
+    "payload_json",
+    JSON.stringify({
+      ...(typeof args.caption === "string" && args.caption ? { content: args.caption } : {}),
+      attachments: [{ id: 0, filename: name }],
+    }),
+  );
+  form.append("files[0]", new Blob([data]), name);
+  // Multipart upload: cannot go through discordApi (it forces JSON).
+  const res = await fetch(`${config.apiBase}/channels/${channelId}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bot ${config.token}` },
+    body: form,
+  });
+  if (!res.ok) {
+    throw new Error(`Discord API error ${res.status} uploading file: ${await bodySnippet(res)}`);
+  }
+  const json = await res.json().catch(() => ({}));
+  return `Sent ${JSON.stringify(name)} (${info.size} bytes) to channel ${channelId} (message id ${json.id ?? "unknown"})`;
+}
+
+async function toolReadAttachment(args) {
+  const url = requireString(args, "url");
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`invalid url: ${url}`);
+  }
+  if (!config.attachmentHosts.has(parsed.hostname)) {
+    throw new Error(
+      `read_attachment only fetches Discord CDN attachments (${[...config.attachmentHosts].join(", ")}); got host ${parsed.hostname}`,
+    );
+  }
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(
+      `download failed (${res.status}) — Discord CDN links expire; ask for the file again if this is an old message`,
+    );
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length > MAX_DOWNLOAD_BYTES) {
+    throw new Error(`attachment is ${buf.length} bytes (cap ${MAX_DOWNLOAD_BYTES})`);
+  }
+  await mkdir(DOWNLOAD_DIR, { recursive: true });
+  const base = sanitizeFilename(args.filename || path.basename(parsed.pathname) || "attachment");
+  const dest = path.join(DOWNLOAD_DIR, `${Date.now()}-${base}`);
+  await writeFile(dest, buf);
+  return JSON.stringify(
+    { path: dest, bytes: buf.length, content_type: res.headers.get("content-type") ?? "unknown" },
+    null,
+    2,
+  );
+}
+
 async function handleToolCall(params) {
   const name = params?.name;
   const args = params?.arguments ?? {};
@@ -428,6 +765,14 @@ async function handleToolCall(params) {
         return toolText(await toolAddReaction(args));
       case "read_messages":
         return toolText(await toolReadMessages(args));
+      case "create_poll":
+        return toolText(await toolCreatePoll(args));
+      case "create_thread":
+        return toolText(await toolCreateThread(args));
+      case "send_file":
+        return toolText(await toolSendFile(args));
+      case "read_attachment":
+        return toolText(await toolReadAttachment(args));
       default:
         return toolError(`unknown tool: ${name}`);
     }
@@ -459,6 +804,10 @@ const gateway = {
   resuming: false,
   selfId: null,
   botRoleByGuild: new Map(), // guild_id -> the bot's managed role id
+  threadToParent: new Map(), // thread channel id -> parent channel id
+  // `${channel_id}:${author_id}` -> epoch ms of that sender's last
+  // forwarded message (the mention continuation window).
+  lastForwardedAt: new Map(),
   backoffMs: 1000,
   reconnectTimer: null,
   heartbeatFirstTimer: null,
@@ -587,11 +936,29 @@ function handleDispatch(payload) {
           gateway.botRoleByGuild.set(d.id, role.id);
         }
       }
+      // Active threads may be nested under channels in the guild payload.
+      for (const thread of d.threads ?? []) {
+        rememberThreadParent(thread?.id, thread?.parent_id);
+      }
       break;
     }
-    case "MESSAGE_CREATE":
-      handleMessageCreate(payload.d ?? {});
+    case "THREAD_CREATE":
+    case "THREAD_UPDATE":
+      rememberThreadParent(payload.d?.id, payload.d?.parent_id);
       break;
+    case "THREAD_DELETE":
+      if (payload.d?.id) gateway.threadToParent.delete(String(payload.d.id));
+      break;
+    case "MESSAGE_CREATE": {
+      // Serialize handling: the thread-allowlist REST fallback is async, and
+      // interleaving would let an unmentioned message race into a later
+      // message's continuation window.
+      const d = payload.d ?? {};
+      gateway.messageChain = (gateway.messageChain ?? Promise.resolve())
+        .then(() => handleMessageCreate(d))
+        .catch((err) => log(`message handling failed for ${d?.id ?? "?"}: ${err?.message ?? err}`));
+      break;
+    }
     default:
       break;
   }
@@ -612,7 +979,34 @@ function stripLeadingMention(content, guildId) {
   return content;
 }
 
-function handleMessageCreate(d) {
+function rememberThreadParent(threadId, parentId) {
+  if (threadId && parentId) gateway.threadToParent.set(String(threadId), String(parentId));
+}
+
+/// Channel-allowlist check that treats a thread as its parent channel.
+/// Sync when the mapping is known; falls back to one REST lookup for
+/// threads whose THREAD_CREATE was missed (e.g. bridge restart).
+async function guildChannelAllowed(channelId) {
+  if (config.channelIds.size === 0) return true;
+  if (config.channelIds.has(channelId)) return true;
+  const cachedParent = gateway.threadToParent.get(channelId);
+  if (cachedParent) return config.channelIds.has(cachedParent);
+  try {
+    const res = await discordApi("GET", `/channels/${channelId}`);
+    if (res.ok) {
+      const ch = await res.json();
+      if (ch?.parent_id) {
+        rememberThreadParent(channelId, ch.parent_id);
+        return config.channelIds.has(String(ch.parent_id));
+      }
+    }
+  } catch (err) {
+    log(`channel lookup failed for ${channelId}: ${err?.message ?? err}`);
+  }
+  return false;
+}
+
+async function handleMessageCreate(d) {
   const author = d.author ?? {};
   const authorId = author.id !== undefined && author.id !== null ? String(author.id) : "";
 
@@ -623,15 +1017,25 @@ function handleMessageCreate(d) {
 
   // 2. Room gates (all silent drops).
   const isDm = !d.guild_id;
+  const channelId = String(d.channel_id ?? "");
   if (isDm) {
     if (!config.allowDms) return;
   } else {
-    if (config.channelIds.size > 0 && !config.channelIds.has(String(d.channel_id))) return;
+    if (!(await guildChannelAllowed(channelId))) return;
     if (config.requireMention) {
+      // "Addressed to the bot" = a user/role mention, a Discord reply to one
+      // of the bot's messages, or a continuation from a sender whose message
+      // was forwarded within the window (split content only mentions in its
+      // first chunk).
       const mentioned = (d.mentions ?? []).some((m) => m?.id === gateway.selfId);
       const botRoleId = gateway.botRoleByGuild.get(d.guild_id);
       const roleMentioned = botRoleId ? (d.mention_roles ?? []).includes(botRoleId) : false;
-      if (!mentioned && !roleMentioned) return;
+      const replyToBot = d.referenced_message?.author?.id === gateway.selfId;
+      const withinWindow =
+        config.mentionWindowMs > 0 &&
+        Date.now() - (gateway.lastForwardedAt.get(`${channelId}:${authorId}`) ?? 0) <=
+          config.mentionWindowMs;
+      if (!mentioned && !roleMentioned && !replyToBot && !withinWindow) return;
     }
   }
 
@@ -653,7 +1057,9 @@ function handleMessageCreate(d) {
   let text = stripLeadingMention(String(d.content ?? ""), d.guild_id);
   for (const attachment of d.attachments ?? []) {
     const url = attachment?.url;
-    if (url) text += `${text.length > 0 ? "\n" : ""}[attachment: ${url}]`;
+    if (!url) continue;
+    const label = attachment?.filename ? `attachment ${JSON.stringify(attachment.filename)}` : "attachment";
+    text += `${text.length > 0 ? "\n" : ""}[${label}: ${url}]`;
   }
   if (text.trim().length === 0) return;
 
@@ -666,11 +1072,16 @@ function handleMessageCreate(d) {
   };
   if (d.guild_id) {
     meta.guild_id = String(d.guild_id);
+    const parent = gateway.threadToParent.get(channelId);
+    if (parent) meta.parent_channel_id = parent;
   } else {
     meta.dm = "true";
   }
   if (author.bot === true) meta.bot = "true";
 
+  // Sliding continuation window: any forwarded message keeps this sender's
+  // floor open in this channel.
+  gateway.lastForwardedAt.set(`${channelId}:${authorId}`, Date.now());
   writeMessage({
     jsonrpc: "2.0",
     method: "notifications/codex/channel",

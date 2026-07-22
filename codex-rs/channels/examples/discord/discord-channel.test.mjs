@@ -191,14 +191,34 @@ class MockRest {
       req.on("data", (chunk) => (body += chunk));
       req.on("end", () => {
         const url = new URL(req.url, "http://127.0.0.1");
+        let parsedBody = null;
+        try {
+          parsedBody = body.length > 0 ? JSON.parse(body) : null;
+        } catch {
+          // multipart or raw upload — keep raw only
+        }
         const record = {
           method: req.method,
           path: url.pathname,
           query: Object.fromEntries(url.searchParams),
-          body: body.length > 0 ? JSON.parse(body) : null,
+          contentType: req.headers["content-type"] ?? "",
+          body: parsedBody,
+          raw: body,
         };
         this.requests.push(record);
-        if (req.method === "POST" && /^\/channels\/[^/]+\/messages$/.test(url.pathname)) {
+        if (req.method === "GET" && url.pathname.startsWith("/cdn/")) {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("cdn-attachment-bytes");
+        } else if (req.method === "POST" && /^\/channels\/[^/]+\/threads$/.test(url.pathname)) {
+          const parent = url.pathname.split("/")[2];
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ id: "T9", parent_id: parent, type: 11 }));
+        } else if (req.method === "GET" && /^\/channels\/T\d+$/.test(url.pathname)) {
+          const id = url.pathname.split("/")[2];
+          const parents = { T1: "G1", T2: "GX" };
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ id, parent_id: parents[id] ?? null, type: 11 }));
+        } else if (req.method === "POST" && /^\/channels\/[^/]+\/messages$/.test(url.pathname)) {
           counter += 1;
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ id: `m${counter}`, channel_id: url.pathname.split("/")[2] }));
@@ -368,21 +388,29 @@ async function main() {
       clientInfo: { name: "e2e-test", version: "0.0.0" },
     });
     assert.ok(init.result.capabilities.experimental["codex/channel"], "codex/channel capability");
-    assert.equal(init.result.serverInfo.version, "1.1.0");
+    assert.equal(init.result.serverInfo.version, "1.2.0");
     assert.ok(init.result.instructions.includes("send_message"));
     assert.ok(init.result.instructions.includes("loop forever"));
-    await client.waitForStderr("discord-channel bridge v1.1.0 starting");
-    pass("initialize declares codex/channel, version 1.1.0, and instructions");
+    await client.waitForStderr("discord-channel bridge v1.2.0 starting");
+    pass("initialize declares codex/channel, version 1.2.0, and instructions");
 
     // 2. tools/list returns exactly the three tools.
     client.notify("notifications/initialized", {});
     const tools = await client.request("tools/list", {});
     assert.deepEqual(
       tools.result.tools.map((t) => t.name).sort(),
-      ["add_reaction", "read_messages", "send_message"],
+      [
+        "add_reaction",
+        "create_poll",
+        "create_thread",
+        "read_attachment",
+        "read_messages",
+        "send_file",
+        "send_message",
+      ],
     );
     for (const tool of tools.result.tools) assert.ok(tool.inputSchema);
-    pass("tools/list returns send_message, add_reaction, read_messages");
+    pass("tools/list returns all seven tools");
 
     // 3. HELLO -> IDENTIFY with the token and intents.
     await gateway.waitForConnection();
@@ -610,6 +638,173 @@ async function main() {
       attachments: ["http://x/a.png"],
     });
     pass("read_messages GETs with limit and returns simplified JSON");
+
+    // ── Phase 2: a second bridge with a channel allowlist, a short
+    // mention window, and test attachment hosts — covers the ported
+    // features: continuation window, reply-to-bot, thread allowlist
+    // inheritance, create_thread/create_poll, send_file/read_attachment.
+    const gateway2 = new MockGateway();
+    const rest2 = new MockRest();
+    const gwPort2 = await gateway2.listen();
+    const restPort2 = await rest2.listen();
+    const child2 = spawn(process.execPath, [BRIDGE], {
+      env: {
+        ...process.env,
+        DISCORD_BOT_TOKEN: "test-token",
+        DISCORD_ALLOWED_USER_IDS: "111",
+        DISCORD_CHANNEL_IDS: "G1",
+        DISCORD_MENTION_WINDOW_SECONDS: "2",
+        DISCORD_ATTACHMENT_HOSTS: "127.0.0.1",
+        DISCORD_GATEWAY_URL: `ws://127.0.0.1:${gwPort2}`,
+        DISCORD_API_BASE: `http://127.0.0.1:${restPort2}`,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const client2 = new BridgeClient(child2);
+    try {
+      await client2.request("initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "e2e-test-2", version: "0.0.0" },
+      });
+      client2.notify("notifications/initialized", {});
+      await gateway2.waitForConnection();
+      gateway2.send({ op: 10, d: { heartbeat_interval: 200 } });
+      await gateway2.waitForFrame((f) => f.op === 2, 5000, "IDENTIFY (bridge2)");
+      gateway2.send({
+        op: 0,
+        s: 1,
+        t: "READY",
+        d: { session_id: "sess2", resume_gateway_url: "", user: { id: "999", username: "testbot" } },
+      });
+      await client2.waitForStderr("logged in as testbot");
+
+      // 16. Continuation window: a mentioned message opens the floor; the
+      // unmentioned follow-up from the same sender+channel flows.
+      const g1 = { guild_id: "GUILD", channel_id: "G1" };
+      gateway2.send({
+        op: 0, s: 2, t: "MESSAGE_CREATE",
+        d: { id: "W1", ...g1, content: "<@999> part one", author: { id: "111", username: "karl" }, mentions: [{ id: "999" }] },
+      });
+      const w1 = await client2.waitForNotification();
+      assert.equal(w1.params.content, "part one");
+      gateway2.send({
+        op: 0, s: 3, t: "MESSAGE_CREATE",
+        d: { id: "W2", ...g1, content: "part two, no mention", author: { id: "111", username: "karl" }, mentions: [] },
+      });
+      const w2 = await client2.waitForNotification();
+      assert.equal(w2.params.content, "part two, no mention");
+      pass("continuation window forwards the unmentioned follow-up chunk");
+
+      // 17. After the window expires, unmentioned drops — but a Discord
+      // reply to one of the bot's messages still counts as addressed.
+      await sleep(2300);
+      gateway2.send({
+        op: 0, s: 4, t: "MESSAGE_CREATE",
+        d: { id: "W3", ...g1, content: "late, no mention", author: { id: "111", username: "karl" }, mentions: [] },
+      });
+      await client2.assertNoNotification();
+      gateway2.send({
+        op: 0, s: 5, t: "MESSAGE_CREATE",
+        d: {
+          id: "W4", ...g1, content: "replying to you", author: { id: "111", username: "karl" },
+          mentions: [], referenced_message: { id: "old", author: { id: "999" } },
+        },
+      });
+      const w4 = await client2.waitForNotification();
+      assert.equal(w4.params.content, "replying to you");
+      pass("expired window drops; reply-to-bot still counts as addressed");
+
+      // 18. Threads inherit the parent's channel allowlist (REST fallback
+      // when THREAD_CREATE was missed): T1->G1 allowed, T2->GX dropped.
+      await sleep(2300); // let W4's continuation window lapse
+      gateway2.send({
+        op: 0, s: 6, t: "MESSAGE_CREATE",
+        d: { id: "W5", guild_id: "GUILD", channel_id: "T1", content: "<@999> in thread", author: { id: "111", username: "karl" }, mentions: [{ id: "999" }] },
+      });
+      const w5 = await client2.waitForNotification();
+      assert.equal(w5.params.meta.channel_id, "T1");
+      assert.equal(w5.params.meta.parent_channel_id, "G1");
+      gateway2.send({
+        op: 0, s: 7, t: "MESSAGE_CREATE",
+        d: { id: "W6", guild_id: "GUILD", channel_id: "T2", content: "<@999> wrong thread", author: { id: "111", username: "karl" }, mentions: [{ id: "999" }] },
+      });
+      await client2.assertNoNotification();
+      pass("threads inherit the parent allowlist (T1->G1 allowed, T2->GX dropped)");
+
+      // 19. create_thread enforces the parent allowlist and remembers the
+      // new thread's parent.
+      const badThread = await client2.request("tools/call", {
+        name: "create_thread",
+        arguments: { parent_channel_id: "G9", name: "nope" },
+      });
+      assert.ok(badThread.result.isError, "create_thread under non-allowlisted parent must fail");
+      const goodThread = await client2.request("tools/call", {
+        name: "create_thread",
+        arguments: { parent_channel_id: "G1", name: "release @everyone <@&5> work", message: "kickoff" },
+      });
+      assert.ok(!goodThread.result.isError, JSON.stringify(goodThread.result));
+      assert.ok(goodThread.result.content[0].text.includes("T9"));
+      assert.ok(goodThread.result.content[0].text.includes('"release work"'), goodThread.result.content[0].text);
+      gateway2.send({
+        op: 0, s: 8, t: "MESSAGE_CREATE",
+        d: { id: "W7", guild_id: "GUILD", channel_id: "T9", content: "<@999> in new thread", author: { id: "111", username: "karl" }, mentions: [{ id: "999" }] },
+      });
+      const w7 = await client2.waitForNotification();
+      assert.equal(w7.params.meta.parent_channel_id, "G1");
+      pass("create_thread sanitizes the name, gates the parent, and the thread inherits inbound");
+
+      // 20. create_poll posts a native poll body.
+      const poll = await client2.request("tools/call", {
+        name: "create_poll",
+        arguments: {
+          channel_id: "G1",
+          question: "Ship it?",
+          answers: ["Yes", { text: "No", emoji: "👎" }],
+          duration: 48,
+        },
+      });
+      assert.ok(!poll.result.isError, JSON.stringify(poll.result));
+      const pollReq = rest2.requests.find((r) => r.body?.poll);
+      assert.equal(pollReq.body.poll.question.text, "Ship it?");
+      assert.equal(pollReq.body.poll.answers.length, 2);
+      assert.equal(pollReq.body.poll.answers[1].poll_media.emoji.name, "👎");
+      assert.equal(pollReq.body.poll.duration, 48);
+      pass("create_poll posts the native poll body");
+
+      // 21. send_file uploads multipart; read_attachment round-trips.
+      const fsPromises = await import("node:fs/promises");
+      const osModule = await import("node:os");
+      const pathModule = await import("node:path");
+      const tmpFile = pathModule.join(osModule.tmpdir(), `codex-sendfile-${process.pid}.txt`);
+      await fsPromises.writeFile(tmpFile, "upload payload");
+      const sent = await client2.request("tools/call", {
+        name: "send_file",
+        arguments: { channel_id: "G1", file_path: tmpFile, caption: "log attached" },
+      });
+      assert.ok(!sent.result.isError, JSON.stringify(sent.result));
+      const upload = rest2.requests.find((r) => r.contentType.startsWith("multipart/form-data"));
+      assert.ok(upload, "multipart upload recorded");
+      assert.ok(upload.raw.includes("payload_json") && upload.raw.includes("log attached"));
+      const dl = await client2.request("tools/call", {
+        name: "read_attachment",
+        arguments: { url: `http://127.0.0.1:${restPort2}/cdn/notes.txt` },
+      });
+      assert.ok(!dl.result.isError, JSON.stringify(dl.result));
+      const saved = JSON.parse(dl.result.content[0].text);
+      assert.equal(await fsPromises.readFile(saved.path, "utf8"), "cdn-attachment-bytes");
+      const refused = await client2.request("tools/call", {
+        name: "read_attachment",
+        arguments: { url: "http://evil.example/x" },
+      });
+      assert.ok(refused.result.isError);
+      assert.ok(refused.result.content[0].text.includes("only fetches Discord CDN"));
+      pass("send_file multipart upload and read_attachment round-trip with host allowlist");
+    } finally {
+      child2.kill("SIGKILL");
+      gateway2.close();
+      rest2.close();
+    }
 
     // 15. Closing stdin shuts the bridge down cleanly.
     const exit = deferred();
