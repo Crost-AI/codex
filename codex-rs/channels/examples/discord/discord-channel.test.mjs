@@ -423,11 +423,21 @@ async function main() {
       clientInfo: { name: "e2e-test", version: "0.0.0" },
     });
     assert.ok(init.result.capabilities.experimental["codex/channel"], "codex/channel capability");
-    assert.equal(init.result.serverInfo.version, "1.4.0");
+    assert.deepEqual(
+      init.result.capabilities.experimental["codex/channel"].commands,
+      {
+        reply_tool: "send_message",
+        target_meta: "channel_id",
+        target_arg: "channel_id",
+        content_arg: "content",
+      },
+      "host slash-command reply descriptor",
+    );
+    assert.equal(init.result.serverInfo.version, "1.5.0");
     assert.ok(init.result.instructions.includes("send_message"));
     assert.ok(init.result.instructions.includes("loop forever"));
-    await client.waitForStderr("discord-channel bridge v1.4.0 starting");
-    pass("initialize declares codex/channel, version 1.4.0, and instructions");
+    await client.waitForStderr("discord-channel bridge v1.5.0 starting");
+    pass("initialize declares codex/channel, commands descriptor, version 1.5.0, and instructions");
 
     // 2. tools/list returns exactly the three tools.
     client.notify("notifications/initialized", {});

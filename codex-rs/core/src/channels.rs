@@ -126,6 +126,12 @@ impl ChannelHub {
             debug!("dropping channel event from non-active MCP server `{server_name}`");
             return;
         }
+        // Host-executed slash commands (`/status`, `/channels`, `/help`)
+        // short-circuit injection: the host answers through the channel
+        // itself and the model never sees the event.
+        if self.try_handle_command(&server_name, &event).await {
+            return;
+        }
         let rendered = render_channel_event(&server_name, &event.content, &event.meta);
         {
             let mut queue = self
@@ -142,6 +148,78 @@ impl ChannelHub {
         if let Some(session) = self.session.get().and_then(Weak::upgrade) {
             session.maybe_start_turn_for_channel_events().await;
         }
+    }
+
+    /// Tries to execute an inbound event as a host-side slash command.
+    /// Returns `true` when the event was consumed — command recognized,
+    /// executed, and answered through the originating server's declared
+    /// reply tool — so it must NOT inject into the model. Returns `false`
+    /// for everything else (not a command, bot-authored, server declared no
+    /// `commands` descriptor, unknown command name, or no reply target on
+    /// the event); those events flow to the model unchanged.
+    async fn try_handle_command(&self, server_name: &str, event: &ChannelEvent) -> bool {
+        let Some(command) = codex_channels::parse_channel_command(&event.content) else {
+            return false;
+        };
+        // Commands come from humans on the bridge's sender allowlist. A
+        // bot-authored `/status` is not a host command — it injects like
+        // any other message, so the agent can decide what to do.
+        if event.meta.contains_key("bot") {
+            return false;
+        }
+        let Some(session) = self.session.get().and_then(Weak::upgrade) else {
+            return false;
+        };
+        let manager = session.services.mcp_connection_manager.load_full();
+        // Opt-in: only servers that told the host how to route replies get
+        // command handling at all.
+        let Some(descriptor) = manager.channel_commands_descriptor(server_name).await else {
+            return false;
+        };
+        let output = match command.as_str() {
+            "help" => codex_channels::channel_command_help(),
+            "status" | "session" => session.channel_status_text().await,
+            "channels" => {
+                let setup = self
+                    .setup
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                codex_channels::channel_setup_status_text(&setup)
+            }
+            _ => return false,
+        };
+        let Some(target) = event.meta.get(&descriptor.target_meta).cloned() else {
+            warn!(
+                "channel command `/{command}` from `{server_name}` has no `{}` meta to reply \
+                 to; injecting as a normal event",
+                descriptor.target_meta
+            );
+            return false;
+        };
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(descriptor.target_arg.clone(), target.into());
+        arguments.insert(descriptor.content_arg.clone(), output.into());
+        for (arg, meta_key) in &descriptor.extra_args {
+            if let Some(value) = event.meta.get(meta_key) {
+                arguments.insert(arg.clone(), value.clone().into());
+            }
+        }
+        debug!("executing channel slash command `/{command}` from `{server_name}` host-side");
+        if let Err(error) = manager
+            .call_tool(
+                server_name,
+                &descriptor.reply_tool,
+                Some(serde_json::Value::Object(arguments)),
+                None,
+            )
+            .await
+        {
+            warn!("channel command `/{command}` reply via `{server_name}` failed: {error:#}");
+        }
+        // Consumed either way: a command whose reply failed must not fall
+        // through to the model as if it were conversation.
+        true
     }
 
     fn has_events(&self) -> bool {

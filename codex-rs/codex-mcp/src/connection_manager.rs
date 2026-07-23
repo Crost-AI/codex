@@ -936,6 +936,20 @@ impl McpConnectionManager {
             .with_context(|| format!("resources/read failed for `{server}` ({uri})"))
     }
 
+    /// Returns the `commands` reply-routing descriptor a server declared in
+    /// its `codex/channel` capability value, when it opted into
+    /// host-executed slash commands. `None` for unknown servers, failed
+    /// startups, and servers without the descriptor.
+    pub async fn channel_commands_descriptor(
+        &self,
+        server: &str,
+    ) -> Option<codex_channels::ChannelCommandsDescriptor> {
+        self.client_by_name(server)
+            .await
+            .ok()?
+            .channel_commands_descriptor
+    }
+
     /// Returns, for each connected server, whether it declared the
     /// experimental `codex/channel` capability during initialization.
     /// Servers whose startup failed (or is still pending after failure) are

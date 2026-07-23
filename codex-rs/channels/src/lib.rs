@@ -14,6 +14,7 @@
 //! per-channel `.env` credential loader. Session wiring lives in
 //! `codex-core`; MCP wiring lives in `codex-mcp`.
 
+mod commands;
 mod dotenv;
 mod envelope;
 mod event;
@@ -22,6 +23,11 @@ mod queue;
 mod resolve;
 mod spec;
 
+pub use commands::ChannelCommandsDescriptor;
+pub use commands::channel_command_help;
+pub use commands::channel_setup_status_text;
+pub use commands::parse_channel_command;
+pub use commands::parse_channel_commands_descriptor;
 pub use dotenv::parse_dotenv;
 pub use envelope::CHANNEL_EVENT_MAX_CONTENT_BYTES;
 pub use envelope::render_channel_event;
@@ -39,7 +45,9 @@ pub use spec::ChannelSpecError;
 pub use spec::split_channel_entries;
 
 /// Experimental MCP server capability a server declares in its `initialize`
-/// result to register as a channel. The value is a reserved empty object.
+/// result to register as a channel. The value is an object that may carry an
+/// optional `commands` reply-routing descriptor
+/// ([`ChannelCommandsDescriptor`]); other keys are reserved.
 pub const CHANNEL_CAPABILITY: &str = "codex/channel";
 
 /// JSON-RPC notification method channels use to push events to the host.

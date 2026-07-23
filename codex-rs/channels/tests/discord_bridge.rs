@@ -70,6 +70,15 @@ async fn discord_bridge_declares_channel_capability_and_tools() -> anyhow::Resul
         "bridge must declare the {} capability; got {experimental:?}",
         codex_channels::CHANNEL_CAPABILITY,
     );
+    // The capability value carries the host slash-command reply descriptor.
+    let descriptor = experimental
+        .get(codex_channels::CHANNEL_CAPABILITY)
+        .and_then(codex_channels::parse_channel_commands_descriptor)
+        .expect("bridge should declare the commands reply-routing descriptor");
+    assert_eq!(descriptor.reply_tool, "send_message");
+    assert_eq!(descriptor.target_meta, "channel_id");
+    assert_eq!(descriptor.target_arg, "channel_id");
+    assert_eq!(descriptor.content_arg, "content");
     assert!(
         initialize_result
             .instructions

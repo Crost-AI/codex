@@ -94,6 +94,18 @@ All configuration is environment variables (usually via the `.env` file):
 | `DISCORD_GATEWAY_URL` | no | `wss://gateway.discord.gg` | Gateway override (used by the e2e test). |
 | `DISCORD_API_BASE` | no | `https://discord.com/api/v10` | REST base override (used by the e2e test). |
 
+## Slash commands from Discord
+
+A few session commands work straight from Discord — the **host** executes them and replies in the channel; the agent never sees them (and they don't interrupt whatever it's doing):
+
+| You type | You get back |
+| --- | --- |
+| `/status` (or `/session`) | Session/thread id, model, working directory, approval + sandbox policy |
+| `/channels` | The session's channel entries and their resolution state |
+| `/help` | The list above |
+
+With the mention requirement on, address the bot as usual: `@codex /status` (the mention is stripped before the command is parsed). Command messages must *start* with the `/`; anything else — including `/commands` the host doesn't recognize — forwards to the agent as a normal message. Bot-authored messages are never treated as commands, so another agent can't drive your session's host commands.
+
 ## Security model
 
 The allowlist gates on **sender identity, not the room**: anyone who can post

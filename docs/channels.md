@@ -62,6 +62,46 @@ message text, verbatim
 `source` is always the real MCP server name. Each meta entry from the event
 becomes an attribute.
 
+## Host-executed slash commands
+
+A channel can opt into having a few session commands answered by the **host**
+instead of the agent: send `/status` (alias `/session`), `/channels`, or
+`/help` over the channel and Codex replies directly through the channel's
+reply tool — the agent never sees the message, and it works even while a turn
+is running. The bundled Discord bridge (v1.5.0+) declares this.
+
+Rules, all host-enforced:
+
+- The event body must *be* the command: leading `/` + name, optionally
+  followed by text. `see /tmp/x` and `/usr/bin/env` are not commands.
+- Events carrying a `bot` meta key are never treated as commands — another
+  agent on the channel can't drive your session's host commands.
+- Unknown `/commands` (and events with no reply target) inject into the model
+  as normal channel events.
+
+To opt a channel server in, declare a `commands` reply-routing descriptor as
+the value of the `codex/channel` capability:
+
+```json
+"experimental": {
+  "codex/channel": {
+    "commands": {
+      "reply_tool": "send_message",
+      "target_meta": "channel_id",
+      "target_arg": "channel_id",
+      "content_arg": "content",
+      "extra_args": { "thread_ts": "thread_ts" }
+    }
+  }
+}
+```
+
+The host answers a recognized command by calling `reply_tool` with
+`{<target_arg>: <event meta[target_meta]>, <content_arg>: <output>}`, plus
+each optional `extra_args` entry (tool argument name → event meta key) whose
+meta key is present on the event. Without the descriptor, nothing changes:
+every event reaches the model.
+
 ## `[channels]` config
 
 ```toml
@@ -104,7 +144,9 @@ A channel is a standard MCP server (any transport Codex supports; stdio is
 simplest) with two small extensions:
 
 1. Declare the experimental capability `codex/channel` in your `initialize`
-   result. The value is a reserved empty object:
+   result. An empty object is the minimal value; it may also carry the
+   optional `commands` descriptor (see
+   [Host-executed slash commands](#host-executed-slash-commands)):
 
    ```json
    {

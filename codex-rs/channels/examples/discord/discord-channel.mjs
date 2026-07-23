@@ -16,7 +16,7 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 
 // BRIDGE_VERSION: bump on every bridge change.
-const BRIDGE_VERSION = "1.4.0";
+const BRIDGE_VERSION = "1.5.0";
 
 // Discord's upload limit for bots without guild boosts.
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -378,7 +378,21 @@ function initializeResult(params) {
   return {
     protocolVersion: typeof requested === "string" && requested.length > 0 ? requested : "2025-06-18",
     capabilities: {
-      experimental: { "codex/channel": {} },
+      // The `commands` descriptor opts into host-executed slash commands
+      // (/status, /channels, /help): when a non-bot allowlisted sender's
+      // message is such a command, the host answers by calling
+      // `send_message` with the event's `channel_id` meta — the message
+      // never reaches the model.
+      experimental: {
+        "codex/channel": {
+          commands: {
+            reply_tool: "send_message",
+            target_meta: "channel_id",
+            target_arg: "channel_id",
+            content_arg: "content",
+          },
+        },
+      },
       tools: { listChanged: false },
     },
     serverInfo: { name: "discord-channel", version: BRIDGE_VERSION },

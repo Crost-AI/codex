@@ -117,6 +117,10 @@ pub(crate) struct ManagedClient {
     /// Whether the server declared the experimental `codex/channel`
     /// capability in its initialize result.
     pub(crate) declares_channel_capability: bool,
+    /// The `commands` reply-routing descriptor from the `codex/channel`
+    /// capability value, when the server opted into host-executed slash
+    /// commands.
+    pub(crate) channel_commands_descriptor: Option<codex_channels::ChannelCommandsDescriptor>,
     pub(crate) codex_apps_tools_cache_context: Option<ConnectorRuntimeContext<ToolInfo>>,
 }
 
@@ -926,12 +930,14 @@ async fn start_server_task(
         .as_ref()
         .and_then(|exp| exp.get(MCP_SANDBOX_STATE_META_CAPABILITY))
         .is_some();
-    let declares_channel_capability = initialize_result
+    let channel_capability_value = initialize_result
         .capabilities
         .experimental
         .as_ref()
-        .and_then(|exp| exp.get(codex_channels::CHANNEL_CAPABILITY))
-        .is_some();
+        .and_then(|exp| exp.get(codex_channels::CHANNEL_CAPABILITY));
+    let declares_channel_capability = channel_capability_value.is_some();
+    let channel_commands_descriptor =
+        channel_capability_value.and_then(codex_channels::parse_channel_commands_descriptor);
     let list_start = Instant::now();
     let fetch_ticket = codex_apps_tools_cache_context
         .as_ref()
@@ -979,6 +985,7 @@ async fn start_server_task(
         server_instructions: initialize_result.instructions,
         server_supports_sandbox_state_meta_capability,
         declares_channel_capability,
+        channel_commands_descriptor,
         codex_apps_tools_cache_context,
     };
 
