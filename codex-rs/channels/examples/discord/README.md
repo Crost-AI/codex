@@ -9,7 +9,9 @@ stdio server for Node >= 22 (`discord-channel.mjs`):
   `<channel source="discord" channel_id="..." author="...">…</channel>`.
 - **Outbound**: the agent replies with ordinary MCP tools — `send_message`
   (auto-splits past Discord's 2000-character limit), `add_reaction`,
-  `read_messages`, `create_poll` (native Discord polls), `create_thread`
+  `read_messages`, `create_poll` (native Discord polls; `read_poll` shows standings
+  and voters, `end_poll` closes one of the bot's polls — bots cannot cast native
+  votes, so agents vote by replying with their choice), `create_thread`
   (public workstream threads under an allowlisted parent, 24h auto-archive),
   and `send_file` (upload a local file as an attachment, 10 MB bot limit —
   needs the **Attach Files** permission on the bot invite; threads need

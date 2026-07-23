@@ -206,6 +206,41 @@ class MockRest {
           raw: body,
         };
         this.requests.push(record);
+        if (req.method === "GET" && /^\/channels\/[^/]+\/messages\/PM1$/.test(url.pathname)) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              id: "PM1",
+              poll: {
+                question: { text: "Ship it?" },
+                allow_multiselect: false,
+                expiry: "2026-07-23T00:00:00Z",
+                answers: [
+                  { answer_id: 1, poll_media: { text: "Yes" } },
+                  { answer_id: 2, poll_media: { text: "No" } },
+                ],
+                results: {
+                  is_finalized: false,
+                  answer_counts: [{ id: 1, count: 2, me_voted: false }],
+                },
+              },
+            }),
+          );
+          return;
+        }
+        if (req.method === "GET" && url.pathname.includes("/polls/PM1/answers/")) {
+          const answerId = url.pathname.split("/answers/")[1];
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({ users: answerId === "1" ? [{ id: "111", username: "karl" }] : [] }),
+          );
+          return;
+        }
+        if (req.method === "POST" && url.pathname.includes("/polls/PM1/expire")) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ id: "PM1" }));
+          return;
+        }
         if (req.method === "GET" && url.pathname.startsWith("/cdn/")) {
           res.writeHead(200, { "Content-Type": "text/plain" });
           res.end("cdn-attachment-bytes");
@@ -388,11 +423,11 @@ async function main() {
       clientInfo: { name: "e2e-test", version: "0.0.0" },
     });
     assert.ok(init.result.capabilities.experimental["codex/channel"], "codex/channel capability");
-    assert.equal(init.result.serverInfo.version, "1.3.0");
+    assert.equal(init.result.serverInfo.version, "1.4.0");
     assert.ok(init.result.instructions.includes("send_message"));
     assert.ok(init.result.instructions.includes("loop forever"));
-    await client.waitForStderr("discord-channel bridge v1.3.0 starting");
-    pass("initialize declares codex/channel, version 1.3.0, and instructions");
+    await client.waitForStderr("discord-channel bridge v1.4.0 starting");
+    pass("initialize declares codex/channel, version 1.4.0, and instructions");
 
     // 2. tools/list returns exactly the three tools.
     client.notify("notifications/initialized", {});
@@ -403,14 +438,16 @@ async function main() {
         "add_reaction",
         "create_poll",
         "create_thread",
+        "end_poll",
         "read_attachment",
         "read_messages",
+        "read_poll",
         "send_file",
         "send_message",
       ],
     );
     for (const tool of tools.result.tools) assert.ok(tool.inputSchema);
-    pass("tools/list returns all seven tools");
+    pass("tools/list returns all nine tools");
 
     // 3. HELLO -> IDENTIFY with the token and intents.
     await gateway.waitForConnection();
@@ -771,6 +808,25 @@ async function main() {
       assert.equal(pollReq.body.poll.answers[1].poll_media.emoji.name, "👎");
       assert.equal(pollReq.body.poll.duration, 48);
       pass("create_poll posts the native poll body");
+
+      // 20b. read_poll returns standings + voters; end_poll expires.
+      const pollRead = await client2.request("tools/call", {
+        name: "read_poll",
+        arguments: { channel_id: "G1", message_id: "PM1" },
+      });
+      assert.ok(!pollRead.result.isError, JSON.stringify(pollRead.result));
+      const pollData = JSON.parse(pollRead.result.content[0].text);
+      assert.equal(pollData.question, "Ship it?");
+      assert.equal(pollData.answers[0].count, 2);
+      assert.deepEqual(pollData.answers[0].voters, ["karl"]);
+      assert.deepEqual(pollData.answers[1].voters, []);
+      const pollEnd = await client2.request("tools/call", {
+        name: "end_poll",
+        arguments: { channel_id: "G1", message_id: "PM1" },
+      });
+      assert.ok(!pollEnd.result.isError, JSON.stringify(pollEnd.result));
+      assert.ok(rest2.requests.some((r) => r.path.includes("/polls/PM1/expire")));
+      pass("read_poll returns standings and voters; end_poll expires the poll");
 
       // 21. send_file uploads multipart; read_attachment round-trips.
       const fsPromises = await import("node:fs/promises");

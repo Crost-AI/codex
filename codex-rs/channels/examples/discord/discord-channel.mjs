@@ -16,7 +16,7 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 
 // BRIDGE_VERSION: bump on every bridge change.
-const BRIDGE_VERSION = "1.3.0";
+const BRIDGE_VERSION = "1.4.0";
 
 // Discord's upload limit for bots without guild boosts.
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -43,7 +43,9 @@ To reply, call the send_message tool with the channel_id from the block
 (optionally set reply_to_message_id to the triggering message id to make the
 reply threaded). Use add_reaction to acknowledge a message without replying,
 and read_messages to fetch recent channel history for context. Use
-create_poll for a native Discord poll and create_thread to open a public
+create_poll for a native Discord poll (read_poll shows standings and voters,
+end_poll closes one of your polls; bots cannot cast native votes — when asked
+to vote, reply in the channel stating your choice) and create_thread to open a public
 workstream thread under an allowlisted parent channel. Files: send_file
 uploads a local file as an attachment (10 MB limit); incoming messages list
 attachments as [attachment ...: url] lines — pass that url to
@@ -268,6 +270,39 @@ const TOOLS = [
         content: { type: "string", description: "Optional message caption above the poll." },
       },
       required: ["channel_id", "question", "answers"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "read_poll",
+    description:
+      "Read a Discord poll: question, per-answer vote counts, and (up to 25 per answer) " +
+      "who voted. Note: bots cannot cast native poll votes — to vote as an agent, reply " +
+      "in the channel stating your choice; humans vote natively.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: { type: "string", description: "Channel containing the poll message." },
+        message_id: { type: "string", description: "Message id of the poll." },
+        include_voters: {
+          type: "boolean",
+          description: "Include voter usernames per answer (default true).",
+        },
+      },
+      required: ["channel_id", "message_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "end_poll",
+    description: "End a poll early (finalizes results). Only works on polls this bot created.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: { type: "string", description: "Channel containing the poll message." },
+        message_id: { type: "string", description: "Message id of the poll." },
+      },
+      required: ["channel_id", "message_id"],
       additionalProperties: false,
     },
   },
@@ -761,6 +796,61 @@ async function toolReadAttachment(args) {
   );
 }
 
+async function toolReadPoll(args) {
+  const channelId = requireString(args, "channel_id");
+  const messageId = requireString(args, "message_id");
+  const res = await discordApi("GET", `/channels/${channelId}/messages/${messageId}`);
+  if (!res.ok) {
+    throw new Error(`Discord API error ${res.status} reading poll message: ${await bodySnippet(res)}`);
+  }
+  const msg = await res.json().catch(() => ({}));
+  const poll = msg?.poll;
+  if (!poll) throw new Error("that message has no poll");
+  const counts = poll.results?.answer_counts ?? [];
+  const answers = [];
+  for (const a of poll.answers ?? []) {
+    const entry = {
+      id: a.answer_id,
+      text: a.poll_media?.text ?? "",
+      count: counts.find((c) => c.id === a.answer_id)?.count ?? 0,
+    };
+    if (args.include_voters !== false) {
+      // Voter listing is best-effort (permissions, finalization races).
+      const vres = await discordApi(
+        "GET",
+        `/channels/${channelId}/polls/${messageId}/answers/${a.answer_id}`,
+        { query: { limit: "25" } },
+      );
+      if (vres.ok) {
+        const v = await vres.json().catch(() => ({}));
+        entry.voters = (v?.users ?? []).map((u) => u.username ?? u.id);
+      }
+    }
+    answers.push(entry);
+  }
+  return JSON.stringify(
+    {
+      question: poll.question?.text ?? "",
+      allow_multiselect: poll.allow_multiselect === true,
+      is_finalized: poll.results?.is_finalized === true,
+      expiry: poll.expiry ?? null,
+      answers,
+    },
+    null,
+    2,
+  );
+}
+
+async function toolEndPoll(args) {
+  const channelId = requireString(args, "channel_id");
+  const messageId = requireString(args, "message_id");
+  const res = await discordApi("POST", `/channels/${channelId}/polls/${messageId}/expire`);
+  if (!res.ok) {
+    throw new Error(`Discord API error ${res.status} ending poll: ${await bodySnippet(res)}`);
+  }
+  return `Ended poll ${messageId} in channel ${channelId}`;
+}
+
 async function handleToolCall(params) {
   const name = params?.name;
   const args = params?.arguments ?? {};
@@ -774,6 +864,10 @@ async function handleToolCall(params) {
         return toolText(await toolReadMessages(args));
       case "create_poll":
         return toolText(await toolCreatePoll(args));
+      case "read_poll":
+        return toolText(await toolReadPoll(args));
+      case "end_poll":
+        return toolText(await toolEndPoll(args));
       case "create_thread":
         return toolText(await toolCreateThread(args));
       case "send_file":
