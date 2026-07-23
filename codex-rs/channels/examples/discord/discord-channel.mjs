@@ -16,7 +16,7 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 
 // BRIDGE_VERSION: bump on every bridge change.
-const BRIDGE_VERSION = "1.5.0";
+const BRIDGE_VERSION = "1.6.0";
 
 // Discord's upload limit for bots without guild boosts.
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -46,7 +46,9 @@ and read_messages to fetch recent channel history for context. Use
 create_poll for a native Discord poll (read_poll shows standings and voters,
 end_poll closes one of your polls; bots cannot cast native votes — when asked
 to vote, reply in the channel stating your choice) and create_thread to open a public
-workstream thread under an allowlisted parent channel. Files: send_file
+workstream thread under an allowlisted parent channel — rename_thread retitles a
+thread as the work evolves and close_thread archives it when the workstream wraps
+up (threads only, never regular channels). Files: send_file
 uploads a local file as an attachment (10 MB limit); incoming messages list
 attachments as [attachment ...: url] lines — pass that url to
 read_attachment to download it to a local temp path you can then read with
@@ -328,6 +330,45 @@ const TOOLS = [
         },
       },
       required: ["parent_channel_id", "name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "rename_thread",
+    description:
+      "Rename an existing Discord thread (e.g. update a workstream title as the " +
+      "work evolves). Name is sanitized (mentions stripped, max 100 chars). Only " +
+      "works on threads, never regular channels; threads the bot did not create " +
+      "need the Manage Threads permission.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        thread_id: {
+          type: "string",
+          description: "Thread id (the channel_id of messages in the thread).",
+        },
+        name: { type: "string", description: "New thread name (max 100 after sanitization)." },
+      },
+      required: ["thread_id", "name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "close_thread",
+    description:
+      "Close (archive) a Discord thread when its workstream is done. Optionally " +
+      "lock it so only moderators can reopen (lock needs the Manage Threads " +
+      "permission). Only works on threads, never regular channels.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        thread_id: { type: "string", description: "Thread id to archive." },
+        lock: {
+          type: "boolean",
+          description: "Also lock the thread (default false; requires Manage Threads).",
+        },
+      },
+      required: ["thread_id"],
       additionalProperties: false,
     },
   },
@@ -736,6 +777,63 @@ async function toolCreateThread(args) {
   return `Created thread ${threadId} (${JSON.stringify(name)}) under channel ${parentChannelId}${firstNote}`;
 }
 
+/** Verify a thread-management target really is a thread and resolve its
+ *  parent channel. PATCH /channels/{id} works on ANY channel, so without
+ *  this check rename/close tools could modify real channels. */
+async function resolveThreadParent(threadId) {
+  const known = gateway.threadToParent.get(threadId);
+  if (known) return known;
+  const res = await discordApi("GET", `/channels/${threadId}`);
+  if (!res.ok) {
+    throw new Error(`Discord API error ${res.status} looking up ${threadId}: ${await bodySnippet(res)}`);
+  }
+  const info = await res.json().catch(() => ({}));
+  // 10/11/12 = announcement/public/private thread.
+  if (![10, 11, 12].includes(info?.type)) {
+    throw new Error(`${threadId} is not a thread`);
+  }
+  const parentId = typeof info.parent_id === "string" ? info.parent_id : null;
+  if (parentId) rememberThreadParent(threadId, parentId);
+  return parentId;
+}
+
+function requireAllowlistedThreadParent(toolName, parentId) {
+  if (config.channelIds.size > 0 && parentId && !config.channelIds.has(parentId)) {
+    throw new Error(`${toolName}: thread parent ${parentId} is not in DISCORD_CHANNEL_IDS`);
+  }
+}
+
+async function toolRenameThread(args) {
+  const threadId = requireString(args, "thread_id");
+  const name = sanitizeThreadName(args.name);
+  if (!name) throw new Error("rename_thread requires a non-empty name after sanitization");
+  requireAllowlistedThreadParent("rename_thread", await resolveThreadParent(threadId));
+  const res = await discordApi("PATCH", `/channels/${threadId}`, { body: { name } });
+  if (!res.ok) {
+    throw new Error(
+      `Discord API error ${res.status} renaming thread ${threadId}: ${await bodySnippet(res)} ` +
+        "(threads the bot did not create need the Manage Threads permission)",
+    );
+  }
+  return `Renamed thread ${threadId} to ${JSON.stringify(name)}`;
+}
+
+async function toolCloseThread(args) {
+  const threadId = requireString(args, "thread_id");
+  const lock = args.lock === true;
+  requireAllowlistedThreadParent("close_thread", await resolveThreadParent(threadId));
+  const res = await discordApi("PATCH", `/channels/${threadId}`, {
+    body: { archived: true, ...(lock ? { locked: true } : {}) },
+  });
+  if (!res.ok) {
+    throw new Error(
+      `Discord API error ${res.status} closing thread ${threadId}: ${await bodySnippet(res)}` +
+        (lock ? " (locking needs the Manage Threads permission)" : ""),
+    );
+  }
+  return `Closed thread ${threadId} (archived${lock ? " + locked" : ""})`;
+}
+
 async function toolSendFile(args) {
   const channelId = requireString(args, "channel_id");
   const filePath = requireString(args, "file_path");
@@ -884,6 +982,10 @@ async function handleToolCall(params) {
         return toolText(await toolEndPoll(args));
       case "create_thread":
         return toolText(await toolCreateThread(args));
+      case "rename_thread":
+        return toolText(await toolRenameThread(args));
+      case "close_thread":
+        return toolText(await toolCloseThread(args));
       case "send_file":
         return toolText(await toolSendFile(args));
       case "read_attachment":

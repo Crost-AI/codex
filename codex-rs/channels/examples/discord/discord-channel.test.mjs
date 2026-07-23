@@ -248,11 +248,21 @@ class MockRest {
           const parent = url.pathname.split("/")[2];
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ id: "T9", parent_id: parent, type: 11 }));
-        } else if (req.method === "GET" && /^\/channels\/T\d+$/.test(url.pathname)) {
+        } else if (req.method === "GET" && /^\/channels\/[^/]+$/.test(url.pathname)) {
+          // Channel/thread lookup: T* ids are threads, everything else is a
+          // plain guild text channel (type 0).
           const id = url.pathname.split("/")[2];
           const parents = { T1: "G1", T2: "GX" };
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ id, parent_id: parents[id] ?? null, type: 11 }));
+          res.end(
+            id.startsWith("T")
+              ? JSON.stringify({ id, parent_id: parents[id] ?? null, type: 11 })
+              : JSON.stringify({ id, parent_id: null, type: 0 }),
+          );
+        } else if (req.method === "PATCH" && /^\/channels\/[^/]+$/.test(url.pathname)) {
+          // Thread modify (rename / archive).
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ id: url.pathname.split("/")[2], ...(parsedBody ?? {}) }));
         } else if (req.method === "POST" && /^\/channels\/[^/]+\/messages$/.test(url.pathname)) {
           counter += 1;
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -433,11 +443,11 @@ async function main() {
       },
       "host slash-command reply descriptor",
     );
-    assert.equal(init.result.serverInfo.version, "1.5.0");
+    assert.equal(init.result.serverInfo.version, "1.6.0");
     assert.ok(init.result.instructions.includes("send_message"));
     assert.ok(init.result.instructions.includes("loop forever"));
-    await client.waitForStderr("discord-channel bridge v1.5.0 starting");
-    pass("initialize declares codex/channel, commands descriptor, version 1.5.0, and instructions");
+    await client.waitForStderr("discord-channel bridge v1.6.0 starting");
+    pass("initialize declares codex/channel, commands descriptor, version 1.6.0, and instructions");
 
     // 2. tools/list returns exactly the three tools.
     client.notify("notifications/initialized", {});
@@ -446,18 +456,20 @@ async function main() {
       tools.result.tools.map((t) => t.name).sort(),
       [
         "add_reaction",
+        "close_thread",
         "create_poll",
         "create_thread",
         "end_poll",
         "read_attachment",
         "read_messages",
         "read_poll",
+        "rename_thread",
         "send_file",
         "send_message",
       ],
     );
     for (const tool of tools.result.tools) assert.ok(tool.inputSchema);
-    pass("tools/list returns all nine tools");
+    pass("tools/list returns all eleven tools");
 
     // 3. HELLO -> IDENTIFY with the token and intents.
     await gateway.waitForConnection();
@@ -800,6 +812,45 @@ async function main() {
       const w7 = await client2.waitForNotification();
       assert.equal(w7.params.meta.parent_channel_id, "G1");
       pass("create_thread sanitizes the name, gates the parent, and the thread inherits inbound");
+
+      // 19b. rename_thread / close_thread: threads only, allowlist-gated.
+      const rename = await client2.request("tools/call", {
+        name: "rename_thread",
+        arguments: { thread_id: "T9", name: "release @everyone done" },
+      });
+      assert.ok(!rename.result.isError, JSON.stringify(rename.result));
+      assert.ok(rename.result.content[0].text.includes('"release done"'), rename.result.content[0].text);
+      const renamePatch = rest2.requests.findLast((r) => r.method === "PATCH" && r.path === "/channels/T9");
+      assert.equal(renamePatch?.body?.name, "release done");
+      // G1 is a plain channel (mock GET type 0) — must be refused, otherwise
+      // thread tools could rename real channels.
+      const renameChan = await client2.request("tools/call", {
+        name: "rename_thread",
+        arguments: { thread_id: "G1", name: "evil rename" },
+      });
+      assert.ok(renameChan.result.isError, "rename_thread must refuse non-thread channels");
+      assert.ok(renameChan.result.content[0].text.includes("not a thread"), renameChan.result.content[0].text);
+      assert.ok(
+        !rest2.requests.some((r) => r.method === "PATCH" && r.path === "/channels/G1"),
+        "no PATCH was issued against the regular channel",
+      );
+      // T2's parent (GX) is outside the channel allowlist.
+      const renameDenied = await client2.request("tools/call", {
+        name: "rename_thread",
+        arguments: { thread_id: "T2", name: "nope" },
+      });
+      assert.ok(renameDenied.result.isError, "rename_thread must gate on the parent allowlist");
+      assert.ok(renameDenied.result.content[0].text.includes("DISCORD_CHANNEL_IDS"), renameDenied.result.content[0].text);
+      const close = await client2.request("tools/call", {
+        name: "close_thread",
+        arguments: { thread_id: "T9", lock: true },
+      });
+      assert.ok(!close.result.isError, JSON.stringify(close.result));
+      assert.ok(close.result.content[0].text.includes("archived + locked"), close.result.content[0].text);
+      const closePatch = rest2.requests.findLast((r) => r.method === "PATCH" && r.path === "/channels/T9");
+      assert.equal(closePatch?.body?.archived, true);
+      assert.equal(closePatch?.body?.locked, true);
+      pass("rename_thread/close_thread modify threads only, with allowlist gating");
 
       // 20. create_poll posts a native poll body.
       const poll = await client2.request("tools/call", {

@@ -99,12 +99,14 @@ async fn discord_bridge_declares_channel_capability_and_tools() -> anyhow::Resul
         tool_names,
         BTreeSet::from([
             "add_reaction".to_string(),
+            "close_thread".to_string(),
             "create_poll".to_string(),
             "create_thread".to_string(),
             "end_poll".to_string(),
             "read_attachment".to_string(),
             "read_messages".to_string(),
             "read_poll".to_string(),
+            "rename_thread".to_string(),
             "send_file".to_string(),
             "send_message".to_string(),
         ])

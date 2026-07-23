@@ -13,9 +13,13 @@ stdio server for Node >= 22 (`discord-channel.mjs`):
   and voters, `end_poll` closes one of the bot's polls — bots cannot cast native
   votes, so agents vote by replying with their choice), `create_thread`
   (public workstream threads under an allowlisted parent, 24h auto-archive),
-  and `send_file` (upload a local file as an attachment, 10 MB bot limit —
-  needs the **Attach Files** permission on the bot invite; threads need
-  **Create Public Threads**).
+  `rename_thread` / `close_thread` (retitle a thread as the work evolves, or
+  archive — optionally lock — it when the workstream wraps up; both verify
+  the target is a thread and can never touch a regular channel), and
+  `send_file` (upload a local file as an attachment, 10 MB bot limit — needs
+  the **Attach Files** permission on the bot invite; threads need **Create
+  Public Threads**, and renaming/closing threads the bot didn't create — or
+  locking any thread — needs **Manage Threads**).
 - **Files inbound**: incoming attachments arrive as `[attachment "name": url]`
   lines; the `read_attachment` tool downloads that URL (Discord CDN hosts
   only, 25 MB cap) to a temp file the agent can read with its normal file
