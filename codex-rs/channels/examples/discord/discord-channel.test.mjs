@@ -467,11 +467,11 @@ async function main() {
       },
       "host slash-command reply descriptor",
     );
-    assert.equal(init.result.serverInfo.version, "1.8.0");
+    assert.equal(init.result.serverInfo.version, "1.9.0");
     assert.ok(init.result.instructions.includes("send_message"));
     assert.ok(init.result.instructions.includes("loop forever"));
-    await client.waitForStderr("discord-channel bridge v1.8.0 starting");
-    pass("initialize declares codex/channel, commands descriptor, version 1.8.0, and instructions");
+    await client.waitForStderr("discord-channel bridge v1.9.0 starting");
+    pass("initialize declares codex/channel, commands descriptor, version 1.9.0, and instructions");
 
     // 2. tools/list returns exactly the three tools.
     client.notify("notifications/initialized", {});
@@ -493,7 +493,12 @@ async function main() {
       ],
     );
     for (const tool of tools.result.tools) assert.ok(tool.inputSchema);
-    pass("tools/list returns all eleven tools");
+    const toolByName = Object.fromEntries(tools.result.tools.map((t) => [t.name, t]));
+    assert.equal(toolByName.read_messages.annotations.readOnlyHint, true);
+    assert.equal(toolByName.send_message.annotations.destructiveHint, false);
+    assert.equal(toolByName.send_message.annotations.openWorldHint, false);
+    for (const tool of tools.result.tools) assert.ok(tool.annotations, `${tool.name} annotated`);
+    pass("tools/list returns all eleven tools, each with approval annotations");
 
     // 3. HELLO -> IDENTIFY with the token and intents.
     await gateway.waitForConnection();

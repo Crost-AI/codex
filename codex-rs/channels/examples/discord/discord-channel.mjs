@@ -16,7 +16,7 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 
 // BRIDGE_VERSION: bump on every bridge change.
-const BRIDGE_VERSION = "1.8.0";
+const BRIDGE_VERSION = "1.9.0";
 
 // Discord's upload limit for bots without guild boosts.
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -418,6 +418,28 @@ const TOOLS = [
     },
   },
 ];
+
+// MCP tool annotations drive host-side auto-approval (Codex prompts for
+// any tool whose annotations are missing, treating it as
+// possibly-destructive open-world). These are honest: the readers touch
+// nothing; everything else is an additive, closed-world Discord API call
+// (this bridge can only reach Discord — read_attachment is even
+// host-allowlisted to the CDN).
+const TOOL_ANNOTATIONS = {
+  read_messages: { readOnlyHint: true, openWorldHint: false },
+  read_poll: { readOnlyHint: true, openWorldHint: false },
+  read_attachment: { destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  add_reaction: { destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  rename_thread: { destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  close_thread: { destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  end_poll: { destructiveHint: false, openWorldHint: false, idempotentHint: true },
+};
+for (const tool of TOOLS) {
+  tool.annotations = TOOL_ANNOTATIONS[tool.name] ?? {
+    destructiveHint: false,
+    openWorldHint: false,
+  };
+}
 
 function initializeResult(params) {
   const requested = params?.protocolVersion;
