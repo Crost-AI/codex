@@ -51,8 +51,11 @@ channel-specific.
   own bridge connection and an idle subagent would answer messages while the
   root session is busy.)
 - If the agent is idle, an event wakes it immediately as a new turn.
-- If a turn is running, events queue and are delivered together when the turn
-  ends, separated by `---`.
+- If a regular turn is running, events are **steered into it mid-turn** — the
+  same path input typed during a turn uses — so the agent sees the message at
+  its next model step without waiting for the turn to end.
+- During non-steerable turns (review, compact) and Plan mode, events queue
+  and are delivered together when the turn ends, separated by `---`.
 - The queue is bounded (64 events); when full the oldest event is dropped and
   a warning is logged.
 

@@ -269,6 +269,15 @@ impl Session {
             return;
         }
 
+        // A running Regular turn takes the queued events immediately — the
+        // same steer path as input typed mid-turn — so a channel message
+        // reaches the agent while it is working instead of waiting for the
+        // turn to end. Review/compact turns are not steerable; their events
+        // stay queued for turn-end delivery below.
+        if self.try_steer_channel_events().await {
+            return;
+        }
+
         {
             let mut active_turn = self.active_turn.lock().await;
             if active_turn.is_some() {
@@ -304,6 +313,53 @@ impl Session {
             .await;
         self.start_task(turn_context, input, RegularTask::new())
             .await;
+    }
+
+    /// Injects queued channel events into the currently running turn via the
+    /// steer path (the one input typed mid-turn uses). Returns `true` when
+    /// the events were handed to the active task — or the queue was already
+    /// empty — and `false` when there is no steerable Regular task, in which
+    /// case the caller falls back to idle/turn-end delivery. Drain and
+    /// inject happen under the active-turn lock so a turn ending mid-call
+    /// cannot strand drained events.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn checks and turn state updates must remain atomic"
+    )]
+    async fn try_steer_channel_events(&self) -> bool {
+        let mut active = self.active_turn.lock().await;
+        let Some(active_turn) = active.as_mut() else {
+            return false;
+        };
+        let Some(active_task) = active_turn.task.as_ref() else {
+            // Reserved-but-taskless window (a delivery turn is being set
+            // up); leave events queued rather than racing it.
+            return false;
+        };
+        if !matches!(active_task.kind, crate::state::TaskKind::Regular) {
+            return false;
+        }
+        let events = self.services.channel_hub.drain_events();
+        if events.is_empty() {
+            return true;
+        }
+        let text = format!(
+            "{CHANNEL_EVENT_PREAMBLE}\n\n{}",
+            events.join(CHANNEL_EVENT_SEPARATOR)
+        );
+        self.input_queue
+            .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
+                active_turn.turn_state.as_ref(),
+                vec![TurnInput::UserInput {
+                    content: vec![UserInput::Text {
+                        text,
+                        text_elements: Vec::new(),
+                    }],
+                    client_id: None,
+                }],
+            )
+            .await;
+        true
     }
 
     async fn clear_reserved_idle_turn_for_channels(&self) {

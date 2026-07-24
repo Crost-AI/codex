@@ -169,7 +169,7 @@ impl InputQueue {
             .accept_mailbox_delivery_for_current_turn();
     }
 
-    pub(super) async fn extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
+    pub(crate) async fn extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
         &self,
         turn_state: &Mutex<TurnState>,
         input: Vec<TurnInput>,
