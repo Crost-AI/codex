@@ -44,7 +44,7 @@ Use the OAuth2 URL (replace `YOUR_APP_ID`); the permissions integer grants
 View Channels, Send Messages, Read Message History, and Add Reactions:
 
 ```
-https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot&permissions=68672
+https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot+applications.commands&permissions=68672
 ```
 
 ### 3. Find your Discord user id
@@ -102,15 +102,20 @@ All configuration is environment variables (usually via the `.env` file):
 
 ## Slash commands from Discord
 
-A few session commands work straight from Discord — the **host** executes them and replies in the channel; the agent never sees them (and they don't interrupt whatever it's doing):
+A few session commands work straight from Discord — the **host** executes them and replies; the agent never sees them (and they don't interrupt whatever it's doing):
 
-| You type | You get back |
+| Command | You get back |
 | --- | --- |
 | `/status` (or `/session`) | Session/thread id, model, working directory, approval + sandbox policy |
 | `/channels` | The session's channel entries and their resolution state |
 | `/help` | The list above |
 
-With the mention requirement on, address the bot as usual: `@codex /status` (the mention is stripped before the command is parsed). Command messages must *start* with the `/`; anything else — including `/commands` the host doesn't recognize — forwards to the agent as a normal message. Bot-authored messages are never treated as commands, so another agent can't drive your session's host commands.
+They work two ways:
+
+- **Native slash commands** (v1.8.0+): the bridge registers `/status`, `/channels`, `/help`, and `/ask` as real Discord application commands in every server it's in, so they appear in Discord's command picker with autocomplete. The interaction is acknowledged instantly and the host's answer arrives as the command's reply. `/ask prompt:...` sends a message to the agent without needing an @mention. **Requires the `applications.commands` OAuth2 scope** — if commands don't appear, re-invite the bot with `&scope=bot+applications.commands` in the invite URL (no need to kick it first). Registered per guild, so they don't show in DMs — there, plain text works.
+- **Plain text**: a message that *starts* with `/status` etc. (`@codex /status` with the mention requirement on — the mention is stripped first) is intercepted by the host the same way. Anything else — including `/commands` the host doesn't recognize — forwards to the agent as a normal message.
+
+Only allowlisted humans can invoke either form (non-allowlisted users get an ephemeral refusal on native commands); bot-authored messages are never treated as commands, so another agent can't drive your session's host commands.
 
 ## Security model
 

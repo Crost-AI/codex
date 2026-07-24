@@ -256,6 +256,17 @@ class MockRest {
               refreshed_urls: [{ original, refreshed: original.replace("/cdn-expired/", "/cdn/") }],
             }),
           );
+        } else if (req.method === "PUT" && /^\/applications\/[^/]+\/guilds\/[^/]+\/commands$/.test(url.pathname)) {
+          // Slash command registration (bulk overwrite).
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(parsedBody ?? []));
+        } else if (req.method === "POST" && /^\/interactions\/[^/]+\/[^/]+\/callback$/.test(url.pathname)) {
+          res.writeHead(204);
+          res.end();
+        } else if (req.method === "POST" && /^\/webhooks\/[^/]+\/[^/]+$/.test(url.pathname)) {
+          // Interaction follow-up message.
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ id: "followup-1" }));
         } else if (req.method === "POST" && /^\/channels\/[^/]+\/threads$/.test(url.pathname)) {
           const parent = url.pathname.split("/")[2];
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -452,14 +463,15 @@ async function main() {
         target_meta: "channel_id",
         target_arg: "channel_id",
         content_arg: "content",
+        extra_args: { interaction_token: "interaction_token" },
       },
       "host slash-command reply descriptor",
     );
-    assert.equal(init.result.serverInfo.version, "1.7.0");
+    assert.equal(init.result.serverInfo.version, "1.8.0");
     assert.ok(init.result.instructions.includes("send_message"));
     assert.ok(init.result.instructions.includes("loop forever"));
-    await client.waitForStderr("discord-channel bridge v1.7.0 starting");
-    pass("initialize declares codex/channel, commands descriptor, version 1.7.0, and instructions");
+    await client.waitForStderr("discord-channel bridge v1.8.0 starting");
+    pass("initialize declares codex/channel, commands descriptor, version 1.8.0, and instructions");
 
     // 2. tools/list returns exactly the three tools.
     client.notify("notifications/initialized", {});
@@ -746,9 +758,18 @@ async function main() {
         op: 0,
         s: 1,
         t: "READY",
-        d: { session_id: "sess2", resume_gateway_url: "", user: { id: "999", username: "testbot" } },
+        d: {
+          session_id: "sess2",
+          resume_gateway_url: "",
+          user: { id: "999", username: "testbot" },
+          application: { id: "app1" },
+        },
       });
       await client2.waitForStderr("logged in as testbot");
+      // Discord sends one GUILD_CREATE per guild after READY; the bridge
+      // registers its slash commands there.
+      gateway2.send({ op: 0, s: 100, t: "GUILD_CREATE", d: { id: "GUILD", roles: [], threads: [] } });
+      await client2.waitForStderr("registered 4 slash commands in guild GUILD");
 
       // 16. Continuation window: a mentioned message opens the floor; the
       // unmentioned follow-up from the same sender+channel flows.
@@ -952,6 +973,77 @@ async function main() {
         "refresh-urls endpoint was called for the expired link",
       );
       pass("read_attachment trims trailing punctuation and refreshes expired CDN links");
+
+      // 22. Native slash commands (interactions).
+      const cmdPut = rest2.requests.find(
+        (r) => r.method === "PUT" && r.path === "/applications/app1/guilds/GUILD/commands",
+      );
+      assert.ok(cmdPut, "slash commands registered for the guild on GUILD_CREATE");
+      assert.ok(
+        ["status", "channels", "help", "ask"].every((n) => cmdPut.body.some((c) => c.name === n)),
+        "registered command set includes status, channels, help, ask",
+      );
+      // /status from an allowlisted user: deferred callback + channel event
+      // carrying the interaction token for the host's reply.
+      gateway2.send({
+        op: 0, s: 40, t: "INTERACTION_CREATE",
+        d: {
+          id: "int1", token: "tok1", type: 2, guild_id: "GUILD", channel_id: "G1",
+          member: { user: { id: "111", username: "karl" } },
+          data: { name: "status" },
+        },
+      });
+      const intEv = await client2.waitForNotification();
+      assert.equal(intEv.params.content, "/status");
+      assert.equal(intEv.params.meta.interaction_token, "tok1");
+      assert.equal(intEv.params.meta.author_id, "111");
+      const deferCb = rest2.requests.find(
+        (r) => r.method === "POST" && r.path === "/interactions/int1/tok1/callback",
+      );
+      assert.equal(deferCb?.body?.type, 5, "interaction acknowledged with a deferred callback");
+      // Host reply with the token posts as the interaction follow-up.
+      const follow = await client2.request("tools/call", {
+        name: "send_message",
+        arguments: { channel_id: "G1", content: "session status text", interaction_token: "tok1" },
+      });
+      assert.ok(!follow.result.isError, JSON.stringify(follow.result));
+      const followup = rest2.requests.find(
+        (r) => r.method === "POST" && r.path === "/webhooks/app1/tok1",
+      );
+      assert.equal(followup?.body?.content, "session status text");
+      // Disallowed user: ephemeral refusal, no channel event.
+      gateway2.send({
+        op: 0, s: 41, t: "INTERACTION_CREATE",
+        d: {
+          id: "int2", token: "tok2", type: 2, guild_id: "GUILD", channel_id: "G1",
+          member: { user: { id: "666", username: "mallory" } },
+          data: { name: "status" },
+        },
+      });
+      await client2.assertNoNotification();
+      const deniedCb = rest2.requests.find(
+        (r) => r.method === "POST" && r.path === "/interactions/int2/tok2/callback",
+      );
+      assert.equal(deniedCb?.body?.type, 4);
+      assert.equal(deniedCb?.body?.data?.flags, 64, "non-allowlisted invoker gets an ephemeral refusal");
+      // /ask forwards the prompt as a normal channel event (no token meta).
+      gateway2.send({
+        op: 0, s: 42, t: "INTERACTION_CREATE",
+        d: {
+          id: "int3", token: "tok3", type: 2, guild_id: "GUILD", channel_id: "G1",
+          member: { user: { id: "111", username: "karl" } },
+          data: { name: "ask", options: [{ name: "prompt", value: "run the tests" }] },
+        },
+      });
+      const askEv = await client2.waitForNotification();
+      assert.equal(askEv.params.content, "run the tests");
+      assert.equal(askEv.params.meta.interaction_token, undefined);
+      const askCb = rest2.requests.find(
+        (r) => r.method === "POST" && r.path === "/interactions/int3/tok3/callback",
+      );
+      assert.equal(askCb?.body?.type, 4);
+      assert.equal(askCb?.body?.data?.flags, undefined, "/ask ack is public");
+      pass("native slash commands: registration, defer + follow-up routing, allowlist, /ask");
     } finally {
       child2.kill("SIGKILL");
       gateway2.close();

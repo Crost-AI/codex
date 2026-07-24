@@ -16,7 +16,7 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 
 // BRIDGE_VERSION: bump on every bridge change.
-const BRIDGE_VERSION = "1.7.0";
+const BRIDGE_VERSION = "1.8.0";
 
 // Discord's upload limit for bots without guild boosts.
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -168,6 +168,11 @@ const TOOLS = [
         reply_to_message_id: {
           type: "string",
           description: "Optional message id to reply to (threads the reply under that message).",
+        },
+        interaction_token: {
+          type: "string",
+          description:
+            "Internal: set by the host when answering a native slash command; posts the reply as the interaction follow-up. Leave unset for normal replies.",
         },
       },
       required: ["channel_id", "content"],
@@ -431,6 +436,11 @@ function initializeResult(params) {
             target_meta: "channel_id",
             target_arg: "channel_id",
             content_arg: "content",
+            // Native Discord slash commands defer the interaction and
+            // forward the command as a channel event carrying the
+            // interaction token; copying it into the reply call posts
+            // the host's answer as the interaction follow-up.
+            extra_args: { interaction_token: "interaction_token" },
           },
         },
       },
@@ -591,14 +601,25 @@ function splitMessageContent(content, maxLen = 2000) {
 async function toolSendMessage(args) {
   const channelId = requireString(args, "channel_id");
   const content = requireString(args, "content");
+  // Host slash-command replies carry the interaction token (copied from
+  // event meta via the commands descriptor's extra_args) and post as
+  // interaction follow-ups, resolving the deferred "thinking…" state
+  // instead of appearing as a detached channel message.
+  const interactionToken =
+    typeof args.interaction_token === "string" && args.interaction_token && gateway.applicationId
+      ? args.interaction_token
+      : null;
   const chunks = splitMessageContent(content);
   const ids = [];
   for (let i = 0; i < chunks.length; i++) {
     const body = { content: chunks[i] };
-    if (i === 0 && args.reply_to_message_id) {
+    if (!interactionToken && i === 0 && args.reply_to_message_id) {
       body.message_reference = { message_id: String(args.reply_to_message_id) };
     }
-    const res = await discordApi("POST", `/channels/${channelId}/messages`, { body });
+    const path = interactionToken
+      ? `/webhooks/${gateway.applicationId}/${interactionToken}`
+      : `/channels/${channelId}/messages`;
+    const res = await discordApi("POST", path, { body });
     if (!res.ok) {
       const snippet = await bodySnippet(res);
       const sentNote = ids.length > 0 ? ` (already sent ${ids.length} chunk(s): ${ids.join(", ")})` : "";
@@ -1064,6 +1085,11 @@ const gateway = {
   resumeUrl: null,
   resuming: false,
   selfId: null,
+  // Application id from READY — needed to register slash commands and to
+  // post interaction follow-up replies.
+  applicationId: null,
+  // Guilds whose slash commands were registered this process run.
+  slashCommandGuilds: new Set(),
   botRoleByGuild: new Map(), // guild_id -> the bot's managed role id
   threadToParent: new Map(), // thread channel id -> parent channel id
   // `${channel_id}:${author_id}` -> epoch ms of that sender's last
@@ -1172,6 +1198,143 @@ function warnEmptyAllowlist() {
   );
 }
 
+// Native Discord slash commands, registered per guild (guild commands
+// update instantly; global ones can lag). /status, /channels, and /help
+// are answered by the host through the channel-command path; /ask
+// forwards a prompt to the agent without needing an @mention.
+const SLASH_COMMANDS = [
+  { name: "status", description: "Show the session: model, working directory, approval/sandbox policy", type: 1 },
+  { name: "channels", description: "Show the session's channel entries and their state", type: 1 },
+  { name: "help", description: "List the commands this session responds to", type: 1 },
+  {
+    name: "ask",
+    description: "Send a message to the session (no @mention needed)",
+    type: 1,
+    options: [{ type: 3, name: "prompt", description: "What to tell the agent", required: true }],
+  },
+];
+
+async function registerSlashCommands(guildId) {
+  if (!gateway.applicationId || gateway.slashCommandGuilds.has(guildId)) return;
+  gateway.slashCommandGuilds.add(guildId);
+  const res = await discordApi(
+    "PUT",
+    `/applications/${gateway.applicationId}/guilds/${guildId}/commands`,
+    { body: SLASH_COMMANDS },
+  );
+  if (!res.ok) {
+    gateway.slashCommandGuilds.delete(guildId);
+    log(
+      `slash command registration failed for guild ${guildId} (${res.status}): ` +
+        `${await bodySnippet(res)} — if this is a 403, re-invite the bot with the ` +
+        "applications.commands scope added to the OAuth2 URL",
+    );
+    return;
+  }
+  log(`registered ${SLASH_COMMANDS.length} slash commands in guild ${guildId}`);
+}
+
+async function interactionCallback(d, payload) {
+  const res = await discordApi("POST", `/interactions/${d.id}/${d.token}/callback`, {
+    body: payload,
+  });
+  if (!res.ok && res.status !== 204) {
+    log(`interaction callback failed (${res.status}): ${await bodySnippet(res)}`);
+  }
+}
+
+async function handleInteraction(d) {
+  if (d?.type !== 2 || !d.data?.name) return; // application commands only
+  const invoker = d.member?.user ?? d.user;
+  if (!invoker?.id) return;
+  const ephemeral = (content) => ({ type: 4, data: { content, flags: 64 } });
+  // Same identity gate as messages: only allowlisted humans drive the
+  // session. (Discord doesn't let bots invoke slash commands.)
+  if (!config.allowAllUsers && !config.allowedUserIds.has(String(invoker.id))) {
+    log(`ignoring /${d.data.name} from ${invoker.username ?? "?"} (id ${invoker.id}): not allowlisted`);
+    await interactionCallback(d, ephemeral("You're not on this session's sender allowlist."));
+    return;
+  }
+  // Same room gate as messages (guild channels only; DMs have no guild).
+  if (d.guild_id && config.channelIds.size > 0) {
+    const channelId = String(d.channel_id ?? "");
+    const allowed =
+      config.channelIds.has(channelId) ||
+      config.channelIds.has(gateway.threadToParent.get(channelId) ?? "");
+    if (!allowed) {
+      await interactionCallback(
+        d,
+        ephemeral("This session is not listening in this channel (DISCORD_CHANNEL_IDS)."),
+      );
+      return;
+    }
+  }
+  const meta = {
+    channel_id: String(d.channel_id ?? ""),
+    author: String(invoker.username ?? ""),
+    author_id: String(invoker.id),
+  };
+  if (d.guild_id) meta.guild_id = String(d.guild_id);
+  else meta.dm = "true";
+  switch (d.data.name) {
+    case "status":
+    case "channels": {
+      // Defer publicly ("thinking…"), then hand the command to the host
+      // as a channel event. The host executes it and replies through
+      // send_message; the interaction_token meta (declared in the
+      // commands descriptor's extra_args) routes that reply to the
+      // interaction follow-up webhook instead of a plain channel post.
+      await interactionCallback(d, { type: 5 });
+      writeMessage({
+        jsonrpc: "2.0",
+        method: "notifications/codex/channel",
+        params: { content: `/${d.data.name}`, meta: { ...meta, interaction_token: d.token } },
+      });
+      log(`slash command /${d.data.name} from ${meta.author} deferred to the host`);
+      break;
+    }
+    case "help":
+      // Answerable bridge-side — no host round-trip needed.
+      await interactionCallback(d, {
+        type: 4,
+        data: {
+          content:
+            "Session commands: `/status` (model, cwd, policies), `/channels` (channel " +
+            "status), `/ask` (message the agent without a mention). Regular messages that " +
+            "@mention the bot — or DMs — reach the agent too, and plain-text `/status` etc. " +
+            "still work in any message the bot can read.",
+        },
+      });
+      break;
+    case "ask": {
+      const prompt = (d.data.options ?? []).find((o) => o?.name === "prompt")?.value;
+      if (typeof prompt !== "string" || !prompt.trim()) {
+        await interactionCallback(d, ephemeral("ask needs a non-empty prompt"));
+        return;
+      }
+      // Public ack so the channel sees the handoff; the agent replies as
+      // a normal channel message (model turns can outlive the 15-minute
+      // interaction token, so we don't route its reply through it).
+      await interactionCallback(d, {
+        type: 4,
+        data: { content: "→ passed to the session; the reply will follow here." },
+      });
+      // Follow-ups within the window flow without a mention, like after
+      // any forwarded message.
+      gateway.lastForwardedAt.set(`${meta.channel_id}:${meta.author_id}`, Date.now());
+      writeMessage({
+        jsonrpc: "2.0",
+        method: "notifications/codex/channel",
+        params: { content: prompt.trim(), meta },
+      });
+      log(`slash command /ask from ${meta.author} forwarded to the agent`);
+      break;
+    }
+    default:
+      await interactionCallback(d, ephemeral(`unknown command: /${d.data.name}`));
+  }
+}
+
 function handleDispatch(payload) {
   switch (payload.t) {
     case "READY": {
@@ -1179,6 +1342,7 @@ function handleDispatch(payload) {
       gateway.sessionId = d.session_id ?? null;
       gateway.resumeUrl = d.resume_gateway_url ?? null;
       gateway.selfId = d.user?.id ?? null;
+      gateway.applicationId = d.application?.id ?? null;
       gateway.backoffMs = 1000;
       log(`logged in as ${d.user?.username ?? "unknown"}`);
       if (!config.hasUserAllowlist) warnEmptyAllowlist();
@@ -1201,8 +1365,16 @@ function handleDispatch(payload) {
       for (const thread of d.threads ?? []) {
         rememberThreadParent(thread?.id, thread?.parent_id);
       }
+      registerSlashCommands(d.id).catch((err) =>
+        log(`slash command registration failed for guild ${d.id}: ${err?.message ?? err}`),
+      );
       break;
     }
+    case "INTERACTION_CREATE":
+      handleInteraction(payload.d ?? {}).catch((err) =>
+        log(`interaction handling failed for ${payload.d?.data?.name ?? "?"}: ${err?.message ?? err}`),
+      );
+      break;
     case "THREAD_CREATE":
     case "THREAD_UPDATE":
       rememberThreadParent(payload.d?.id, payload.d?.parent_id);
