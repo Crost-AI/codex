@@ -1219,7 +1219,22 @@ impl Session {
             let codex_apps_auth_manager =
                 codex_mcp::host_owned_codex_apps_enabled(&mcp_projection.config, auth)
                     .then(|| Arc::clone(&sess.services.auth_manager));
-            sess.services.channel_hub.configure(&config);
+            // Channels bind to the ROOT session only. Subagent and internal
+            // threads inherit the same config (including `--channels`
+            // entries), so without this gate every spawned thread would run
+            // its own bridge process with the same credentials — each copy
+            // receives every inbound message, and an idle subagent answers
+            // while the busy root session is still queueing the event.
+            // Skipping configure leaves the hub empty: no credential
+            // overlay (the thread's bridge gets no token) and no
+            // notification listener.
+            let channels_enabled_for_thread = !matches!(
+                session_configuration.session_source,
+                SessionSource::SubAgent(_) | SessionSource::Internal(_)
+            );
+            if channels_enabled_for_thread {
+                sess.services.channel_hub.configure(&config);
+            }
             let channel_setup = sess
                 .services
                 .channel_hub

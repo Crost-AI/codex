@@ -45,6 +45,11 @@ channel-specific.
 
 ## Delivery semantics
 
+- Channels bind to the **root session only**: subagent and internal threads
+  never get channel credentials or a notification listener, even though they
+  inherit the session config. (Otherwise every spawned thread would run its
+  own bridge connection and an idle subagent would answer messages while the
+  root session is busy.)
 - If the agent is idle, an event wakes it immediately as a new turn.
 - If a turn is running, events queue and are delivered together when the turn
   ends, separated by `---`.
