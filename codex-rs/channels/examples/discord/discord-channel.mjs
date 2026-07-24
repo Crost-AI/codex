@@ -16,7 +16,7 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 
 // BRIDGE_VERSION: bump on every bridge change.
-const BRIDGE_VERSION = "1.6.0";
+const BRIDGE_VERSION = "1.7.0";
 
 // Discord's upload limit for bots without guild boosts.
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -874,24 +874,68 @@ async function toolSendFile(args) {
   return `Sent ${JSON.stringify(name)} (${info.size} bytes) to channel ${channelId} (message id ${json.id ?? "unknown"})`;
 }
 
+/** Re-sign an expired/invalid CDN attachment URL through the bot token.
+ *  Returns the refreshed URL, or null when Discord can't refresh it. */
+async function refreshAttachmentUrl(url) {
+  try {
+    const res = await discordApi("POST", "/attachments/refresh-urls", {
+      body: { attachment_urls: [url] },
+    });
+    if (!res.ok) {
+      log(`refresh-urls failed (${res.status})`);
+      return null;
+    }
+    const json = await res.json().catch(() => ({}));
+    const refreshed = json?.refreshed_urls?.[0]?.refreshed;
+    return typeof refreshed === "string" && refreshed ? refreshed : null;
+  } catch (err) {
+    log(`refresh-urls failed: ${err.message}`);
+    return null;
+  }
+}
+
 async function toolReadAttachment(args) {
   const url = requireString(args, "url");
+  // Models often copy the closing "]" of the forwarded
+  // "[attachment ...: url]" line (or markdown punctuation) into the url
+  // argument. Signed CDN query strings never end with these, and one
+  // stray character breaks the signature -> 404.
+  const cleanedUrl = url.trim().replace(/[\]\)>,.'"]+$/, "");
   let parsed;
   try {
-    parsed = new URL(url);
+    parsed = new URL(cleanedUrl);
   } catch {
-    throw new Error(`invalid url: ${url}`);
+    throw new Error(`invalid url: ${cleanedUrl}`);
   }
   if (!config.attachmentHosts.has(parsed.hostname)) {
     throw new Error(
       `read_attachment only fetches Discord CDN attachments (${[...config.attachmentHosts].join(", ")}); got host ${parsed.hostname}`,
     );
   }
-  const res = await fetch(url);
+  let res = await fetch(cleanedUrl);
   if (!res.ok) {
-    throw new Error(
-      `download failed (${res.status}) — Discord CDN links expire; ask for the file again if this is an old message`,
-    );
+    // Signed CDN links expire. The bot token can re-sign them via
+    // POST /attachments/refresh-urls; retry once before giving up.
+    log(`read_attachment: ${res.status} on ${cleanedUrl}; trying refresh-urls`);
+    const refreshed = await refreshAttachmentUrl(cleanedUrl);
+    let refreshedHostOk = false;
+    if (refreshed) {
+      try {
+        refreshedHostOk = config.attachmentHosts.has(new URL(refreshed).hostname);
+      } catch {
+        refreshedHostOk = false;
+      }
+    }
+    if (refreshed && refreshedHostOk) {
+      res = await fetch(refreshed);
+    }
+    if (!res.ok) {
+      throw new Error(
+        `download failed (${res.status}) even after refreshing the signed URL — pass the ` +
+          "attachment URL exactly as it appears in the message (no trailing bracket), or " +
+          "ask for the file to be re-sent",
+      );
+    }
   }
   const buf = Buffer.from(await res.arrayBuffer());
   if (buf.length > MAX_DOWNLOAD_BYTES) {

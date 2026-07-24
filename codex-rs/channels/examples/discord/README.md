@@ -23,7 +23,9 @@ stdio server for Node >= 22 (`discord-channel.mjs`):
 - **Files inbound**: incoming attachments arrive as `[attachment "name": url]`
   lines; the `read_attachment` tool downloads that URL (Discord CDN hosts
   only, 25 MB cap) to a temp file the agent can read with its normal file
-  tools.
+  tools. Stray trailing punctuation (like a copied `]`) is trimmed from the
+  URL, and expired signed CDN links are automatically re-signed through the
+  bot token (`/attachments/refresh-urls`) and retried (v1.7.0+).
 
 ## Setup
 

@@ -244,6 +244,18 @@ class MockRest {
         if (req.method === "GET" && url.pathname.startsWith("/cdn/")) {
           res.writeHead(200, { "Content-Type": "text/plain" });
           res.end("cdn-attachment-bytes");
+        } else if (req.method === "GET" && url.pathname.startsWith("/cdn-expired/")) {
+          // Simulates a signed CDN URL whose signature expired.
+          res.writeHead(404);
+          res.end("{}");
+        } else if (req.method === "POST" && url.pathname.endsWith("/attachments/refresh-urls")) {
+          const original = parsedBody?.attachment_urls?.[0] ?? "";
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              refreshed_urls: [{ original, refreshed: original.replace("/cdn-expired/", "/cdn/") }],
+            }),
+          );
         } else if (req.method === "POST" && /^\/channels\/[^/]+\/threads$/.test(url.pathname)) {
           const parent = url.pathname.split("/")[2];
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -443,11 +455,11 @@ async function main() {
       },
       "host slash-command reply descriptor",
     );
-    assert.equal(init.result.serverInfo.version, "1.6.0");
+    assert.equal(init.result.serverInfo.version, "1.7.0");
     assert.ok(init.result.instructions.includes("send_message"));
     assert.ok(init.result.instructions.includes("loop forever"));
-    await client.waitForStderr("discord-channel bridge v1.6.0 starting");
-    pass("initialize declares codex/channel, commands descriptor, version 1.6.0, and instructions");
+    await client.waitForStderr("discord-channel bridge v1.7.0 starting");
+    pass("initialize declares codex/channel, commands descriptor, version 1.7.0, and instructions");
 
     // 2. tools/list returns exactly the three tools.
     client.notify("notifications/initialized", {});
@@ -917,6 +929,29 @@ async function main() {
       assert.ok(refused.result.isError);
       assert.ok(refused.result.content[0].text.includes("only fetches Discord CDN"));
       pass("send_file multipart upload and read_attachment round-trip with host allowlist");
+
+      // 21b. Trailing "]" copied from the forwarded [attachment ...] line
+      // is trimmed, and expired signed URLs are re-signed via
+      // /attachments/refresh-urls and retried.
+      const bracket = await client2.request("tools/call", {
+        name: "read_attachment",
+        arguments: { url: `http://127.0.0.1:${restPort2}/cdn/bracket.txt]` },
+      });
+      assert.ok(!bracket.result.isError, JSON.stringify(bracket.result));
+      const bracketSaved = JSON.parse(bracket.result.content[0].text);
+      assert.equal(await fsPromises.readFile(bracketSaved.path, "utf8"), "cdn-attachment-bytes");
+      const refreshed = await client2.request("tools/call", {
+        name: "read_attachment",
+        arguments: { url: `http://127.0.0.1:${restPort2}/cdn-expired/old-report.txt` },
+      });
+      assert.ok(!refreshed.result.isError, JSON.stringify(refreshed.result));
+      const refreshedSaved = JSON.parse(refreshed.result.content[0].text);
+      assert.equal(await fsPromises.readFile(refreshedSaved.path, "utf8"), "cdn-attachment-bytes");
+      assert.ok(
+        rest2.requests.some((r) => r.method === "POST" && r.path.endsWith("/attachments/refresh-urls")),
+        "refresh-urls endpoint was called for the expired link",
+      );
+      pass("read_attachment trims trailing punctuation and refreshes expired CDN links");
     } finally {
       child2.kill("SIGKILL");
       gateway2.close();
