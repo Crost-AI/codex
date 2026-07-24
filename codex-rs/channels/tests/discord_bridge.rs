@@ -33,7 +33,8 @@ async fn discord_bridge_declares_channel_capability_and_tools() -> anyhow::Resul
         eprintln!("skipping: node is not on PATH");
         return Ok(());
     }
-    let bridge = codex_utils_cargo_bin::find_resource!("examples/discord/discord-channel.mjs")?;
+    let bridge =
+        codex_utils_cargo_bin::find_resource!("examples/discord/server/discord-channel.mjs")?;
 
     let client = RmcpClient::new_stdio_client(
         OsString::from("node"),
