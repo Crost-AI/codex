@@ -170,10 +170,13 @@ impl ChannelHub {
         let Some(session) = self.session.get().and_then(Weak::upgrade) else {
             return false;
         };
-        let manager = session.services.mcp_connection_manager.load_full();
+        let mcp_runtime = Arc::clone(&session.services.mcp_runtime);
         // Opt-in: only servers that told the host how to route replies get
         // command handling at all.
-        let Some(descriptor) = manager.channel_commands_descriptor(server_name).await else {
+        let Some(descriptor) = mcp_runtime
+            .latest_channel_commands_descriptor(server_name)
+            .await
+        else {
             return false;
         };
         let output = match command.as_str() {
@@ -206,8 +209,8 @@ impl ChannelHub {
             }
         }
         debug!("executing channel slash command `/{command}` from `{server_name}` host-side");
-        if let Err(error) = manager
-            .call_tool(
+        if let Err(error) = mcp_runtime
+            .latest_call_tool(
                 server_name,
                 &descriptor.reply_tool,
                 Some(serde_json::Value::Object(arguments)),
@@ -430,9 +433,7 @@ pub(crate) fn apply_channel_env_overlay(
         let Some(server) = mcp_servers.get(server_name) else {
             continue;
         };
-        let Some(config) = server.configured_config() else {
-            continue;
-        };
+        let config = server.config();
         let McpServerTransportConfig::Stdio {
             command,
             args,

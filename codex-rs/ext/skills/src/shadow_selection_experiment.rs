@@ -11,9 +11,13 @@ use codex_protocol::user_input::UserInput;
 
 use crate::catalog::SkillCatalog;
 use crate::catalog::SkillSourceKind;
+use crate::dynamic_skill_selector::CharacterNgramSkillSelector;
 use crate::dynamic_skill_selector::CheapSkillSelection;
 use crate::dynamic_skill_selector::CheapSkillSelector;
 use crate::dynamic_skill_selector::FieldedBm25SkillSelector;
+use crate::dynamic_skill_selector::MultiQueryLexicalSkillSelector;
+use crate::dynamic_skill_selector::RoutingCardLexicalSkillSelector;
+use crate::dynamic_skill_selector::RrfLexicalCharSkillSelector;
 use crate::dynamic_skill_selector::SkillSelectionDocument;
 use crate::dynamic_skill_selector::WeightedLexicalSkillSelector;
 
@@ -39,6 +43,10 @@ impl ShadowSelectionExperiment {
             selectors: vec![
                 Box::new(WeightedLexicalSkillSelector),
                 Box::new(FieldedBm25SkillSelector),
+                Box::new(CharacterNgramSkillSelector),
+                Box::new(MultiQueryLexicalSkillSelector),
+                Box::new(RrfLexicalCharSkillSelector),
+                Box::new(RoutingCardLexicalSkillSelector),
             ],
             metrics_client,
         }
@@ -56,8 +64,7 @@ impl ShadowSelectionExperiment {
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
-                entry.enabled
-                    && entry.prompt_visible
+                entry.is_model_visible()
                     // Invocation observation currently exists only for host shell use and
                     // orchestrator reads. Keep the candidate set aligned with that universe.
                     && matches!(
@@ -70,6 +77,7 @@ impl ShadowSelectionExperiment {
                 name: entry.name.as_str(),
                 short_description: entry.short_description.as_deref(),
                 description: entry.description.as_str(),
+                dependencies: entry.dependencies.as_ref(),
             })
             .collect::<Vec<_>>();
         let eligible_ids = documents
@@ -233,12 +241,12 @@ fn sanitize_selected_ids(
 }
 
 fn selection_status(selection: &CheapSkillSelection, selected_entry_count: usize) -> &'static str {
-    if selection.query_term_count == 0 {
-        "no_query_terms"
-    } else if selected_entry_count == 0 {
-        "no_matches"
-    } else {
+    if selected_entry_count > 0 {
         "selected"
+    } else if selection.query_term_count == 0 {
+        "no_query_terms"
+    } else {
+        "no_matches"
     }
 }
 

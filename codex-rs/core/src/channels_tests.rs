@@ -28,7 +28,7 @@ fn stdio_server(env: Option<HashMap<String, String>>) -> EffectiveMcpServer {
 }
 
 fn server_env(server: &EffectiveMcpServer) -> Option<HashMap<String, String>> {
-    let config = server.configured_config().expect("configured server");
+    let config = server.config();
     match &config.transport {
         McpServerTransportConfig::Stdio { env, .. } => env.clone(),
         McpServerTransportConfig::StreamableHttp { .. } => panic!("expected stdio transport"),

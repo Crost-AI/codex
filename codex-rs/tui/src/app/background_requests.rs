@@ -1037,6 +1037,7 @@ async fn request_plugin_list_with_marketplace_kinds(
             params: PluginListParams {
                 cwds: Some(vec![cwd]),
                 marketplace_kinds,
+                force_refetch: false,
             },
         })
         .await
