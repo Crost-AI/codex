@@ -2886,6 +2886,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-crost-memory-extension"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "codex-extension-api",
+ "codex-protocol",
+ "codex-tools",
+ "codex-utils-output-truncation",
+ "pretty_assertions",
+ "rand 0.9.3",
+ "regex",
+ "reqwest 0.12.28",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "codex-exec"
 version = "0.0.0"
 dependencies = [
