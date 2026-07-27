@@ -9,6 +9,7 @@ async fn session_summary_skips_when_no_usage_or_resume_hint() {
             /*thread_id*/ None,
             /*thread_name*/ None,
             /*rollout_path*/ None,
+            /*channels*/ &[],
         )
         .is_none()
     );
@@ -27,6 +28,7 @@ async fn session_summary_skips_resume_hint_until_rollout_exists() {
             Some(conversation),
             /*thread_name*/ None,
             Some(&rollout_path),
+            /*channels*/ &[],
         )
         .is_none()
     );
@@ -50,6 +52,7 @@ async fn session_summary_includes_resume_hint_for_persisted_rollout() {
         Some(conversation),
         /*thread_name*/ None,
         Some(&rollout_path),
+        /*channels*/ &[],
     )
     .expect("summary");
     assert_eq!(
@@ -80,6 +83,7 @@ async fn session_summary_names_picker_item_when_thread_has_name() {
         Some(conversation),
         Some("my-session".to_string()),
         Some(&rollout_path),
+        /*channels*/ &[],
     )
     .expect("summary");
     assert_eq!(
@@ -88,5 +92,27 @@ async fn session_summary_names_picker_item_when_thread_has_name() {
             "codex resume, then select my-session (123e4567-e89b-12d3-a456-426614174000)"
                 .to_string()
         )
+    );
+}
+
+#[tokio::test]
+async fn session_summary_resume_hint_carries_channels_opt_in() {
+    let usage = TokenUsage::default();
+    let conversation = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
+    let temp_dir = tempdir().expect("temp dir");
+    let rollout_path = temp_dir.path().join("rollout.jsonl");
+    std::fs::write(&rollout_path, "{}\n").expect("write rollout");
+
+    let summary = session_summary(
+        usage,
+        Some(conversation),
+        Some("my-session".to_string()),
+        Some(&rollout_path),
+        &["server:discord".to_string()],
+    )
+    .expect("summary");
+    assert_eq!(
+        summary.resume_hint,
+        Some("codex resume my-session --channels server:discord".to_string())
     );
 }

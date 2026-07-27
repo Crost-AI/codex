@@ -1862,6 +1862,11 @@ impl ChatWidget {
         self.thread_name.clone()
     }
 
+    /// This session's `--channels` opt-ins, for the resume hint.
+    pub(crate) fn channels_entries(&self) -> &[String] {
+        &self.config.channels_entries
+    }
+
     /// Returns the current thread's precomputed rollout path.
     ///
     /// For fresh non-ephemeral threads this path may exist before the file is

@@ -437,9 +437,11 @@ fn session_summary(
     thread_id: Option<ThreadId>,
     thread_name: Option<String>,
     rollout_path: Option<&Path>,
+    channels: &[String],
 ) -> Option<SessionSummary> {
     let usage_line = (!token_usage.is_zero()).then(|| token_usage.to_string());
-    let resume_hint = resume_hint_for_resumable_thread(thread_id, thread_name, rollout_path);
+    let resume_hint =
+        resume_hint_for_resumable_thread(thread_id, thread_name, rollout_path, channels);
 
     if usage_line.is_none() && resume_hint.is_none() {
         return None;
@@ -474,9 +476,14 @@ fn resume_hint_for_resumable_thread(
     thread_id: Option<ThreadId>,
     thread_name: Option<String>,
     rollout_path: Option<&Path>,
+    channels: &[String],
 ) -> Option<String> {
     let thread = resumable_thread(thread_id, thread_name, rollout_path)?;
-    codex_utils_cli::resume_hint(thread.thread_name.as_deref(), Some(thread.thread_id))
+    codex_utils_cli::resume_hint_with_channels(
+        thread.thread_name.as_deref(),
+        Some(thread.thread_id),
+        channels,
+    )
 }
 
 fn rollout_path_is_resumable(rollout_path: &Path) -> bool {
@@ -1269,6 +1276,7 @@ See the Codex keymap documentation for supported actions and examples."
             thread_id,
             app.chat_widget.thread_name(),
             app.chat_widget.rollout_path().as_deref(),
+            app.chat_widget.channels_entries(),
         );
         Ok(AppExitInfo {
             token_usage: app.token_usage(),

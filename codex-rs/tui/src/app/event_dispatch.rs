@@ -171,6 +171,7 @@ impl App {
                     self.chat_widget.thread_id(),
                     self.chat_widget.thread_name(),
                     self.chat_widget.rollout_path().as_deref(),
+                    self.chat_widget.channels_entries(),
                 );
                 self.chat_widget
                     .add_plain_history_lines(vec!["/fork".magenta().into()]);
