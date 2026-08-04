@@ -9,6 +9,7 @@ use crate::JsonSchema;
 use crate::ResponsesApiNamespaceTool;
 use crate::ResponsesApiTool;
 use crate::create_tools_json_for_responses_api;
+use crate::create_tools_raw_json_for_responses_api;
 use codex_protocol::config_types::WebSearchContextSize;
 use codex_protocol::config_types::WebSearchFilters as ConfigWebSearchFilters;
 use codex_protocol::config_types::WebSearchUserLocation as ConfigWebSearchUserLocation;
@@ -73,6 +74,7 @@ fn tool_spec_name_covers_all_variants() {
         ToolSpec::Freeform(FreeformTool {
             name: "exec".to_string(),
             description: "Run a command".to_string(),
+            defer_loading: None,
             format: FreeformToolFormat {
                 r#type: "grammar".to_string(),
                 syntax: "lark".to_string(),
@@ -144,26 +146,61 @@ fn create_tools_json_for_responses_api_includes_top_level_name() {
 }
 
 #[test]
+fn raw_tool_json_matches_value_encoding() {
+    let specs = vec![ToolSpec::Function(ResponsesApiTool {
+        name: "demo".to_string(),
+        description: "A demo tool".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            BTreeMap::new(),
+            /*required*/ None,
+            /*additional_properties*/ None,
+        ),
+        output_schema: None,
+    })];
+    let expected = create_tools_json_for_responses_api(&specs).expect("serialize tools");
+    let raw = create_tools_raw_json_for_responses_api(&specs).expect("serialize raw tools");
+
+    assert_eq!(
+        serde_json::from_str::<Vec<serde_json::Value>>(raw.get()).expect("parse raw tools"),
+        expected,
+    );
+}
+
+#[test]
 fn namespace_tool_spec_serializes_expected_wire_shape() {
     assert_eq!(
         serde_json::to_value(ToolSpec::Namespace(ResponsesApiNamespace {
             name: "mcp__demo__".to_string(),
             description: "Demo tools".to_string(),
-            tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
-                name: "lookup_order".to_string(),
-                description: "Look up an order".to_string(),
-                strict: false,
-                defer_loading: None,
-                parameters: JsonSchema::object(
-                    BTreeMap::from([(
-                        "order_id".to_string(),
-                        JsonSchema::string(/*description*/ None),
-                    )]),
-                    /*required*/ None,
-                    /*additional_properties*/ None,
-                ),
-                output_schema: None,
-            })],
+            tools: vec![
+                ResponsesApiNamespaceTool::Function(ResponsesApiTool {
+                    name: "lookup_order".to_string(),
+                    description: "Look up an order".to_string(),
+                    strict: false,
+                    defer_loading: None,
+                    parameters: JsonSchema::object(
+                        BTreeMap::from([(
+                            "order_id".to_string(),
+                            JsonSchema::string(/*description*/ None),
+                        )]),
+                        /*required*/ None,
+                        /*additional_properties*/ None,
+                    ),
+                    output_schema: None,
+                }),
+                ResponsesApiNamespaceTool::Custom(FreeformTool {
+                    name: "apply_patch".to_string(),
+                    description: "Apply a patch".to_string(),
+                    defer_loading: None,
+                    format: FreeformToolFormat {
+                        r#type: "grammar".to_string(),
+                        syntax: "lark".to_string(),
+                        definition: "start: \"patch\"".to_string(),
+                    },
+                }),
+            ],
         }))
         .expect("serialize namespace tool"),
         json!({
@@ -181,6 +218,16 @@ fn namespace_tool_spec_serializes_expected_wire_shape() {
                         "properties": {
                             "order_id": { "type": "string" },
                         },
+                    },
+                },
+                {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "Apply a patch",
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "lark",
+                        "definition": "start: \"patch\"",
                     },
                 },
             ],

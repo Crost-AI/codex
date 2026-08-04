@@ -22,6 +22,7 @@ use futures::future::BoxFuture;
 use futures::future::Shared;
 use tokio_util::task::AbortOnDropHandle;
 
+use crate::session::turn_context::EnvironmentConfig;
 use crate::session::turn_context::TurnEnvironment;
 use crate::shell::Shell;
 use crate::shell_snapshot::ShellSnapshot;
@@ -79,6 +80,8 @@ impl StartingTurnEnvironment {
 pub(crate) struct ThreadEnvironments {
     environment_manager: Arc<EnvironmentManager>,
     local_shell: Shell,
+    // Temporary thread-wide config source until environments supply their own config.
+    fallback_environment_config: EnvironmentConfig,
     shell_snapshot: ShellSnapshot,
     non_blocking_snapshots: bool,
     environments: ArcSwap<Vec<SelectedTurnEnvironment>>,
@@ -89,30 +92,37 @@ impl ThreadEnvironments {
     pub(crate) fn new(
         environment_manager: Arc<EnvironmentManager>,
         local_shell: Shell,
+        fallback_environment_config: EnvironmentConfig,
         shell_snapshot: ShellSnapshot,
         current: TurnEnvironmentSnapshot,
         non_blocking_snapshots: bool,
     ) -> Self {
         // Reuse only attached environments from the supplied snapshot; drop starting entries.
         let environments = current
-            .turn_environments
+            .environments
             .into_iter()
-            .map(|environment| {
+            .filter_map(|environment| {
+                let TurnEnvironmentState::Ready(mut environment) = environment else {
+                    return None;
+                };
+                // Child threads can have a different shell policy from their parent.
+                environment.config = fallback_environment_config.clone();
                 let selection = environment.selection();
                 let selected_environment = Arc::clone(&environment.environment);
                 let resolution: TurnEnvironmentResolution =
                     futures::future::ready(Ok(environment)).boxed().shared();
-                SelectedTurnEnvironment {
+                Some(SelectedTurnEnvironment {
                     selection,
                     environment: selected_environment,
                     connection_events_task: None,
                     resolution,
-                }
+                })
             })
             .collect();
         Self {
             environment_manager,
             local_shell,
+            fallback_environment_config,
             shell_snapshot,
             non_blocking_snapshots,
             environments: ArcSwap::from_pointee(environments),
@@ -163,6 +173,7 @@ impl ThreadEnvironments {
                 selected_environment.clone(),
                 Arc::clone(&environment),
                 self.local_shell.clone(),
+                self.fallback_environment_config.clone(),
                 self.shell_snapshot.clone(),
             )
             .remote_handle();
@@ -262,6 +273,7 @@ impl ThreadEnvironments {
         selection: TurnEnvironmentSelection,
         environment: Arc<Environment>,
         local_shell: Shell,
+        config: EnvironmentConfig,
         shell_snapshot: ShellSnapshot,
     ) -> BoxFuture<'static, TurnEnvironmentResult> {
         async move {
@@ -297,6 +309,7 @@ impl ThreadEnvironments {
                 selection.cwd,
                 selection.workspace_roots,
                 shell,
+                config,
             );
             let task = shell_snapshot
                 .build(turn_environment.clone())
@@ -311,31 +324,25 @@ impl ThreadEnvironments {
 
     #[tracing::instrument(name = "environments.snapshot", skip_all)]
     pub(crate) async fn snapshot(&self) -> TurnEnvironmentSnapshot {
-        let current = self.environments.load_full();
-        let mut turn_environments = Vec::with_capacity(current.len());
-        let mut starting = Vec::new();
-        for environment in current.iter() {
+        let selected = self.environments.load_full();
+        let mut environments = Vec::with_capacity(selected.len());
+        for environment in selected.iter() {
             let resolved = if self.non_blocking_snapshots {
                 environment.resolution.clone().now_or_never()
             } else {
                 Some(environment.resolution.clone().await)
             };
-            match resolved {
-                Some(Ok(turn_environment)) => turn_environments.push(turn_environment),
-                Some(Err(err)) => tracing::debug!(
-                    environment_id = %environment.selection.environment_id,
-                    "skipping failed turn environment: {err}"
-                ),
-                None => starting.push(StartingTurnEnvironment {
+            if let Some(environment) = TurnEnvironmentState::from_resolution(
+                StartingTurnEnvironment {
                     selection: environment.selection.clone(),
                     resolution: environment.resolution.clone(),
-                }),
+                },
+                resolved,
+            ) {
+                environments.push(environment);
             }
         }
-        TurnEnvironmentSnapshot {
-            turn_environments,
-            starting,
-        }
+        TurnEnvironmentSnapshot { environments }
     }
 
     pub(crate) fn environment_manager(&self) -> Arc<EnvironmentManager> {
@@ -343,17 +350,79 @@ impl ThreadEnvironments {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum TurnEnvironmentState {
+    Ready(TurnEnvironment),
+    Starting(StartingTurnEnvironment),
+}
+
+impl TurnEnvironmentState {
+    fn from_resolution(
+        starting: StartingTurnEnvironment,
+        resolved: Option<TurnEnvironmentResult>,
+    ) -> Option<Self> {
+        match resolved {
+            Some(Ok(environment)) => Some(Self::Ready(environment)),
+            Some(Err(err)) => {
+                tracing::debug!(
+                    environment_id = %starting.selection.environment_id,
+                    "skipping failed turn environment: {err}"
+                );
+                None
+            }
+            None => Some(Self::Starting(starting)),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TurnEnvironmentSnapshot {
-    pub(crate) turn_environments: Vec<TurnEnvironment>,
-    pub(crate) starting: Vec<StartingTurnEnvironment>,
+    // Keep ready and starting environments in their original selection order.
+    pub(crate) environments: Vec<TurnEnvironmentState>,
 }
 
 impl TurnEnvironmentSnapshot {
+    /// Promotes completed startup work without adopting newer thread selections.
+    pub(crate) fn refresh_readiness(&self) -> Self {
+        let environments = self
+            .environments
+            .iter()
+            .filter_map(|environment| match environment {
+                TurnEnvironmentState::Ready(environment) => {
+                    Some(TurnEnvironmentState::Ready(environment.clone()))
+                }
+                TurnEnvironmentState::Starting(environment) => {
+                    TurnEnvironmentState::from_resolution(
+                        environment.clone(),
+                        environment.resolution.clone().now_or_never(),
+                    )
+                }
+            })
+            .collect();
+        Self { environments }
+    }
+
+    pub(crate) fn turn_environments(&self) -> impl Iterator<Item = &TurnEnvironment> {
+        self.environments.iter().filter_map(|environment| {
+            let TurnEnvironmentState::Ready(environment) = environment else {
+                return None;
+            };
+            Some(environment)
+        })
+    }
+
+    pub(crate) fn starting(&self) -> impl Iterator<Item = &StartingTurnEnvironment> {
+        self.environments.iter().filter_map(|environment| {
+            let TurnEnvironmentState::Starting(environment) = environment else {
+                return None;
+            };
+            Some(environment)
+        })
+    }
+
     /// Maps each captured environment to its exact ready handle, or `None` when it was starting.
     pub(crate) fn captured_environments(&self) -> HashMap<String, Option<Arc<Environment>>> {
-        self.turn_environments
-            .iter()
+        self.turn_environments()
             .map(|environment| {
                 (
                     environment.environment_id.clone(),
@@ -361,20 +430,18 @@ impl TurnEnvironmentSnapshot {
                 )
             })
             .chain(
-                self.starting
-                    .iter()
+                self.starting()
                     .map(|environment| (environment.selection.environment_id.clone(), None)),
             )
             .collect()
     }
 
     pub(crate) fn primary(&self) -> Option<&TurnEnvironment> {
-        self.turn_environments.first()
+        self.turn_environments().next()
     }
 
     pub(crate) fn local(&self) -> Option<&TurnEnvironment> {
-        self.turn_environments
-            .iter()
+        self.turn_environments()
             .find(|environment| !environment.environment.is_remote())
     }
 
@@ -385,8 +452,7 @@ impl TurnEnvironmentSnapshot {
     }
 
     pub(crate) fn to_selections(&self) -> Vec<TurnEnvironmentSelection> {
-        self.turn_environments
-            .iter()
+        self.turn_environments()
             .map(TurnEnvironment::selection)
             .collect()
     }
@@ -397,12 +463,14 @@ impl TurnEnvironmentSnapshot {
     }
 
     pub(crate) fn single_local_environment(&self) -> Option<&TurnEnvironment> {
-        if !self.starting.is_empty() {
+        if self.starting().next().is_some() {
             return None;
         }
-        let [environment] = self.turn_environments.as_slice() else {
+        let mut environments = self.turn_environments();
+        let environment = environments.next()?;
+        if environments.next().is_some() {
             return None;
-        };
+        }
 
         (!environment.environment.is_remote()).then_some(environment)
     }
@@ -422,6 +490,9 @@ mod tests {
     use codex_exec_server::ExecServerRuntimePaths;
     use codex_exec_server::LOCAL_ENVIRONMENT_ID;
     use codex_exec_server::REMOTE_ENVIRONMENT_ID;
+    use codex_exec_server_test_support::environment_manager_without_environments;
+    use codex_http_client::HttpClientFactory;
+    use codex_http_client::OutboundProxyPolicy;
     use codex_protocol::protocol::TurnEnvironmentSelection;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use codex_utils_path_uri::PathUri;
@@ -445,6 +516,9 @@ mod tests {
         let turn_environments = Arc::new(ThreadEnvironments::new(
             environment_manager,
             crate::shell::default_user_shell(),
+            EnvironmentConfig {
+                allow_login_shell: true,
+            },
             ShellSnapshot::disabled(),
             TurnEnvironmentSnapshot::default(),
             /*non_blocking_snapshots*/ false,
@@ -551,10 +625,13 @@ url = "ws://127.0.0.1:8765"
         .expect("write environments.toml");
         let cwd = AbsolutePathBuf::current_dir().expect("cwd");
         let cwd_uri = PathUri::from_abs_path(&cwd);
-        let manager =
-            EnvironmentManager::from_codex_home(temp_dir.path(), Some(test_runtime_paths()))
-                .await
-                .expect("environment manager");
+        let manager = EnvironmentManager::from_codex_home(
+            temp_dir.path(),
+            Some(test_runtime_paths()),
+            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        )
+        .await
+        .expect("environment manager");
 
         assert_eq!(
             default_thread_environment_selections(&manager, &cwd, std::slice::from_ref(&cwd)),
@@ -576,7 +653,7 @@ url = "ws://127.0.0.1:8765"
     #[tokio::test]
     async fn default_thread_environment_selections_empty_when_default_disabled() {
         let cwd = AbsolutePathBuf::current_dir().expect("cwd");
-        let manager = EnvironmentManager::without_environments();
+        let manager = environment_manager_without_environments();
 
         assert_eq!(
             default_thread_environment_selections(&manager, &cwd, std::slice::from_ref(&cwd)),
@@ -585,7 +662,7 @@ url = "ws://127.0.0.1:8765"
     }
 
     #[tokio::test]
-    async fn local_environment_uses_configured_shell() {
+    async fn local_environment_uses_configured_shell_and_login_policy() {
         let cwd = AbsolutePathBuf::current_dir().expect("cwd");
         let local_shell = Shell {
             shell_type: crate::shell::ShellType::Zsh,
@@ -594,6 +671,9 @@ url = "ws://127.0.0.1:8765"
         let turn_environments = ThreadEnvironments::new(
             Arc::new(EnvironmentManager::default_for_tests()),
             local_shell.clone(),
+            EnvironmentConfig {
+                allow_login_shell: false,
+            },
             ShellSnapshot::disabled(),
             TurnEnvironmentSnapshot::default(),
             /*non_blocking_snapshots*/ false,
@@ -605,13 +685,10 @@ url = "ws://127.0.0.1:8765"
         }]);
 
         let snapshot = turn_environments.snapshot().await;
+        let environment = snapshot.primary().expect("local environment");
 
-        assert_eq!(
-            snapshot
-                .primary()
-                .and_then(|environment| environment.shell.as_ref()),
-            Some(&local_shell)
-        );
+        assert_eq!(environment.shell.as_ref(), Some(&local_shell));
+        assert!(!environment.config.allow_login_shell);
     }
 
     #[tokio::test]
@@ -733,6 +810,9 @@ url = "ws://127.0.0.1:8765"
         let environments = Arc::new(ThreadEnvironments::new(
             manager,
             crate::shell::default_user_shell(),
+            EnvironmentConfig {
+                allow_login_shell: true,
+            },
             ShellSnapshot::disabled(),
             TurnEnvironmentSnapshot::default(),
             /*non_blocking_snapshots*/ false,
@@ -751,13 +831,13 @@ url = "ws://127.0.0.1:8765"
             .expect("snapshot should finish after the environment starts")
             .expect("snapshot task");
 
-        assert!(snapshot.starting.is_empty());
+        assert!(snapshot.starting().next().is_none());
         assert_eq!(snapshot.to_selections(), vec![selection]);
         server.await.expect("server task");
     }
 
     #[tokio::test]
-    async fn snapshot_keeps_starting_environment_until_it_can_be_attached() {
+    async fn snapshot_refreshes_readiness_in_selection_order() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind websocket listener");
@@ -786,40 +866,58 @@ url = "ws://127.0.0.1:8765"
         let turn_environments = ThreadEnvironments::new(
             manager,
             crate::shell::default_user_shell(),
+            EnvironmentConfig {
+                allow_login_shell: true,
+            },
             ShellSnapshot::disabled(),
             TurnEnvironmentSnapshot::default(),
             /*non_blocking_snapshots*/ true,
         );
+        turn_environments.update_selections(std::slice::from_ref(&local));
+        turn_environments.environments.load()[0]
+            .resolution
+            .clone()
+            .await
+            .expect("local environment should resolve");
         turn_environments.update_selections(&[remote.clone(), local.clone()]);
 
         let starting = turn_environments.snapshot().await;
-        assert!(starting.turn_environments.is_empty());
         assert_eq!(
             starting
-                .starting
-                .iter()
+                .turn_environments()
+                .map(TurnEnvironment::selection)
+                .collect::<Vec<_>>(),
+            vec![local.clone()]
+        );
+        assert_eq!(
+            starting
+                .starting()
                 .map(|environment| environment.selection.clone())
                 .collect::<Vec<_>>(),
-            vec![remote.clone(), local.clone()]
+            vec![remote.clone()]
         );
-        assert!(starting.to_selections().is_empty());
+        assert_eq!(starting.to_selections(), vec![local.clone()]);
         assert!(starting.single_local_environment().is_none());
 
         let server = tokio::spawn(serve_environment_info(listener));
         timeout(
             std::time::Duration::from_secs(5),
-            starting.starting[0].resolution.clone(),
+            starting
+                .starting()
+                .next()
+                .expect("starting environment")
+                .resolution
+                .clone(),
         )
         .await
         .expect("environment resolution should finish")
         .expect("environment resolution should succeed");
-        let attached = turn_environments.snapshot().await;
+        let attached = starting.refresh_readiness();
 
-        assert!(attached.starting.is_empty());
+        assert!(attached.starting().next().is_none());
         assert_eq!(
             attached
-                .turn_environments
-                .iter()
+                .turn_environments()
                 .map(TurnEnvironment::selection)
                 .collect::<Vec<_>>(),
             vec![remote.clone(), local.clone()]
@@ -845,6 +943,9 @@ url = "ws://127.0.0.1:8765"
         let environments = ThreadEnvironments::new(
             Arc::clone(&manager),
             crate::shell::default_user_shell(),
+            EnvironmentConfig {
+                allow_login_shell: true,
+            },
             ShellSnapshot::disabled(),
             TurnEnvironmentSnapshot::default(),
             /*non_blocking_snapshots*/ true,
@@ -866,9 +967,10 @@ url = "ws://127.0.0.1:8765"
         environments.update_selections(std::slice::from_ref(&selection));
 
         let replacement = environments.snapshot().await;
-        let [replacement] = replacement.starting.as_slice() else {
-            panic!("expected the replacement environment to be starting");
-        };
+        let replacement = replacement
+            .starting()
+            .next()
+            .expect("expected the replacement environment to be starting");
         assert_eq!(replacement.selection, selection);
         assert!(!failed_resolution.ptr_eq(&replacement.resolution));
     }
@@ -898,6 +1000,9 @@ url = "ws://127.0.0.1:8765"
         let environments = Arc::new(ThreadEnvironments::new(
             Arc::clone(&manager),
             crate::shell::default_user_shell(),
+            EnvironmentConfig {
+                allow_login_shell: true,
+            },
             ShellSnapshot::disabled(),
             TurnEnvironmentSnapshot::default(),
             /*non_blocking_snapshots*/ true,
@@ -930,16 +1035,16 @@ url = "ws://127.0.0.1:8765"
         let changed_snapshot = environments.snapshot().await;
 
         let initial = initial_snapshot
-            .starting
-            .first()
+            .starting()
+            .next()
             .expect("initial environment");
         let reused = reused_snapshot
-            .starting
-            .first()
+            .starting()
+            .next()
             .expect("reused environment");
         let changed = changed_snapshot
-            .starting
-            .first()
+            .starting()
+            .next()
             .expect("changed environment");
         assert!(initial.resolution.ptr_eq(&reused.resolution));
         assert!(!reused.resolution.ptr_eq(&changed.resolution));
@@ -970,7 +1075,7 @@ url = "ws://127.0.0.1:8765"
     }
 
     #[tokio::test]
-    async fn inherited_environment_reuses_parent_handle() {
+    async fn inherited_environment_reuses_parent_handle_and_uses_child_login_policy() {
         let cwd = AbsolutePathBuf::current_dir().expect("cwd");
         let selection = TurnEnvironmentSelection {
             environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
@@ -987,8 +1092,11 @@ url = "ws://127.0.0.1:8765"
             selection.cwd.clone(),
             Vec::new(),
             /*shell*/ None,
+            EnvironmentConfig {
+                allow_login_shell: true,
+            },
         );
-        let manager = Arc::new(EnvironmentManager::without_environments());
+        let manager = Arc::new(environment_manager_without_environments());
         manager
             .upsert_environment(
                 REMOTE_ENVIRONMENT_ID.to_string(),
@@ -999,10 +1107,12 @@ url = "ws://127.0.0.1:8765"
         let environments = ThreadEnvironments::new(
             manager,
             crate::shell::default_user_shell(),
+            EnvironmentConfig {
+                allow_login_shell: false,
+            },
             ShellSnapshot::disabled(),
             TurnEnvironmentSnapshot {
-                turn_environments: vec![inherited],
-                starting: Vec::new(),
+                environments: vec![TurnEnvironmentState::Ready(inherited)],
             },
             /*non_blocking_snapshots*/ false,
         );
@@ -1010,13 +1120,9 @@ url = "ws://127.0.0.1:8765"
         environments.update_selections(std::slice::from_ref(&selection));
         let snapshot = environments.snapshot().await;
 
-        assert!(Arc::ptr_eq(
-            &snapshot
-                .primary()
-                .expect("inherited environment")
-                .environment,
-            &inherited_environment,
-        ));
+        let inherited = snapshot.primary().expect("inherited environment");
+        assert!(Arc::ptr_eq(&inherited.environment, &inherited_environment));
+        assert!(!inherited.config.allow_login_shell);
     }
 
     #[tokio::test]
@@ -1039,27 +1145,31 @@ url = "ws://127.0.0.1:8765"
                 .expect("remote environment"),
         );
         let remote = TurnEnvironmentSnapshot {
-            turn_environments: vec![TurnEnvironment::new(
+            environments: vec![TurnEnvironmentState::Ready(TurnEnvironment::new(
                 REMOTE_ENVIRONMENT_ID.to_string(),
                 remote_environment.clone(),
                 cwd_uri.clone(),
                 Vec::new(),
                 /*shell*/ None,
-            )],
-            starting: Vec::new(),
+                EnvironmentConfig {
+                    allow_login_shell: true,
+                },
+            ))],
         };
         let multiple = TurnEnvironmentSnapshot {
-            turn_environments: vec![
-                local.primary().expect("local environment").clone(),
-                TurnEnvironment::new(
+            environments: vec![
+                TurnEnvironmentState::Ready(local.primary().expect("local environment").clone()),
+                TurnEnvironmentState::Ready(TurnEnvironment::new(
                     REMOTE_ENVIRONMENT_ID.to_string(),
                     remote_environment,
                     cwd_uri,
                     Vec::new(),
                     /*shell*/ None,
-                ),
+                    EnvironmentConfig {
+                        allow_login_shell: true,
+                    },
+                )),
             ],
-            starting: Vec::new(),
         };
 
         assert_eq!(local.single_local_environment_cwd(), Some(cwd));

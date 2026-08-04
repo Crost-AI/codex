@@ -41,13 +41,13 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RealtimeConversationVersion as RealtimeWsVersion;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::user_input::UserInput;
@@ -67,6 +67,7 @@ use crate::responses::output_value_to_text;
 use crate::responses::start_mock_server;
 use crate::streaming_sse::StreamingSseServer;
 use crate::test_environment;
+use crate::wait_for_event;
 use crate::wait_for_event_match;
 use crate::wait_for_event_with_timeout;
 use wiremock::Match;
@@ -277,13 +278,6 @@ fn docker_command_capture_stdout<const N: usize>(args: [&str; N]) -> Result<Stri
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ApplyPatchModelOutput {
     ShellCommandViaHeredoc,
-}
-
-/// A collection of different ways the model can output an apply_patch call
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ShellModelOutput {
-    ShellCommand,
-    // UnifiedExec has its own set of tests
 }
 
 /// Returns the permission fields required by test thread-settings overrides.
@@ -555,6 +549,21 @@ impl TestCodexBuilder {
         .await
     }
 
+    pub async fn restart(
+        &mut self,
+        server: &MockServer,
+        previous: &TestCodex,
+    ) -> Result<TestCodex> {
+        let rollout_path = previous
+            .session_configured
+            .rollout_path
+            .clone()
+            .context("rollout path")?;
+        previous.codex.shutdown_and_wait().await?;
+        self.resume(server, Arc::clone(&previous.home), rollout_path)
+            .await
+    }
+
     async fn build_with_home_and_base_url(
         &mut self,
         base_url: String,
@@ -658,6 +667,7 @@ impl TestCodexBuilder {
             codex_core::test_support::with_code_mode_host_program(
                 thread_manager,
                 code_mode_host_program,
+                &config,
             )
         } else {
             thread_manager
@@ -703,24 +713,11 @@ impl TestCodexBuilder {
                 .await?
             }
             (None, None) => {
-                let environments = thread_manager
-                    .default_environment_selections(&config.cwd, &config.workspace_roots);
-                Box::pin(
-                    thread_manager.start_thread_with_options(StartThreadOptions {
-                        config: config.clone(),
-                        allow_provider_model_fallback: false,
-                        initial_history: InitialHistory::New,
-                        history_mode: self.history_mode,
-                        session_source: None,
-                        thread_source: None,
-                        dynamic_tools: Vec::new(),
-                        metrics_service_name: None,
-                        parent_trace: None,
-                        environments,
-                        thread_extension_init: Default::default(),
-                        supports_openai_form_elicitation: self.supports_openai_form_elicitation,
-                    }),
-                )
+                Box::pin(thread_manager.start_thread(StartThreadOptions {
+                    history_mode: self.history_mode,
+                    supports_openai_form_elicitation: self.supports_openai_form_elicitation,
+                    ..StartThreadOptions::new(config.clone())
+                }))
                 .await?
             }
         };
@@ -849,6 +846,25 @@ impl TestCodex {
     pub async fn submit_turn(&self, prompt: &str) -> Result<()> {
         self.submit_turn_with_permission_profile(prompt, PermissionProfile::Disabled)
             .await
+    }
+
+    /// Submits a text turn without changing the current thread settings.
+    pub async fn submit_text_turn(&self, prompt: &str) -> Result<()> {
+        self.codex
+            .submit(Op::UserInput {
+                items: vec![UserInput::Text {
+                    text: prompt.into(),
+                    text_elements: Vec::new(),
+                }],
+                final_output_json_schema: None,
+                responsesapi_client_metadata: None,
+                additional_context: Default::default(),
+                thread_settings: ThreadSettingsOverrides::default(),
+            })
+            .await?;
+
+        wait_for_event(&self.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+        Ok(())
     }
 
     pub async fn submit_turn_with_permission_profile(
@@ -980,7 +996,7 @@ impl TestCodex {
                 final_output_json_schema: None,
                 responsesapi_client_metadata: None,
                 additional_context: Default::default(),
-                thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+                thread_settings: ThreadSettingsOverrides {
                     environments: turn_environment_selections,
                     approval_policy: Some(approval_policy),
                     sandbox_policy: Some(sandbox_policy),
@@ -1023,14 +1039,6 @@ pub struct TestCodexHarness {
 }
 
 impl TestCodexHarness {
-    pub async fn new() -> Result<Self> {
-        Self::with_builder(test_codex()).await
-    }
-
-    pub async fn with_config(mutator: impl FnOnce(&mut Config) + Send + 'static) -> Result<Self> {
-        Self::with_builder(test_codex().with_config(mutator)).await
-    }
-
     pub async fn with_builder(mut builder: TestCodexBuilder) -> Result<Self> {
         let server = start_mock_server().await;
         let test = builder.build(&server).await?;
@@ -1053,10 +1061,6 @@ impl TestCodexHarness {
 
     pub fn cwd(&self) -> &Path {
         self.test.config.cwd.as_path()
-    }
-
-    pub fn cwd_abs(&self) -> AbsolutePathBuf {
-        self.test.config.cwd.clone()
     }
 
     pub fn path(&self, rel: impl AsRef<Path>) -> PathBuf {
@@ -1160,16 +1164,6 @@ impl TestCodexHarness {
         Box::pin(self.test.submit_turn(prompt)).await
     }
 
-    pub async fn submit_with_policy(
-        &self,
-        prompt: &str,
-        sandbox_policy: SandboxPolicy,
-    ) -> Result<()> {
-        self.test
-            .submit_turn_with_policy(prompt, sandbox_policy)
-            .await
-    }
-
     pub async fn submit_with_permission_profile(
         &self,
         prompt: &str,
@@ -1260,6 +1254,11 @@ pub fn test_codex() -> TestCodexBuilder {
                 .features
                 .disable(Feature::Apps)
                 .expect("test config should allow Apps override");
+            // Snapshot tests opt in explicitly; avoid spawning login shells for every test.
+            config
+                .features
+                .disable(Feature::ShellSnapshot)
+                .expect("test config should allow ShellSnapshot override");
         })],
         auth: CodexAuth::from_api_key("dummy"),
         pre_build_hooks: vec![],

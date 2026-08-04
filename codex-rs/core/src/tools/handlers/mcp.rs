@@ -4,6 +4,7 @@ use std::time::Instant;
 use crate::function_tool::FunctionCallError;
 use crate::mcp_tool_call::handle_mcp_tool_call;
 use crate::original_image_detail::can_request_original_image_detail;
+use crate::session::session::Session;
 use crate::tools::context::McpToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
@@ -23,11 +24,14 @@ use codex_tools::ToolSearchInfo;
 use codex_tools::ToolSearchSourceInfo;
 use codex_tools::ToolSpec;
 use codex_tools::mcp_tool_to_responses_api_tool;
+use codex_utils_string::take_bytes_at_char_boundary;
+use futures::future::BoxFuture;
 use serde_json::Map;
 use serde_json::Value;
 
 const LEGACY_MCP_TOOL_NAME_PREFIX: &str = "mcp__";
 const MCP_TOOL_NAME_DELIMITER: &str = "__";
+const MAX_MCP_NAMESPACE_DESCRIPTION_BYTES: usize = 512 * 1024;
 
 pub struct McpHandler {
     tool_info: ToolInfo,
@@ -141,7 +145,6 @@ impl McpHandler {
         };
 
         let started = Instant::now();
-        // TODO(sayan): Use StepContext for MCP file arguments when MCP follows dynamic environments.
         let result = handle_mcp_tool_call(
             Arc::clone(&session),
             &step_context,
@@ -164,17 +167,20 @@ impl McpHandler {
 }
 
 impl CoreToolRuntime for McpHandler {
-    fn telemetry_tags<'a>(
-        &'a self,
-        _invocation: &'a ToolInvocation,
-    ) -> futures::future::BoxFuture<'a, ToolTelemetryTags> {
-        Box::pin(async {
-            let mut tags = vec![("mcp_server", self.tool_info.server_name.clone())];
-            if let Some(origin) = &self.tool_info.server_origin {
-                tags.push(("mcp_server_origin", origin.clone()));
-            }
-            tags
-        })
+    fn wait_until_ready<'a>(&'a self, session: &'a Arc<Session>) -> Option<BoxFuture<'a, ()>> {
+        Some(Box::pin(async move {
+            session
+                .wait_for_mcp_server(&self.tool_info.server_name)
+                .await;
+        }))
+    }
+
+    fn telemetry_tags(&self, _invocation: &ToolInvocation) -> ToolTelemetryTags {
+        let mut tags = vec![("mcp_server", self.tool_info.server_name.clone())];
+        if let Some(origin) = &self.tool_info.server_origin {
+            tags.push(("mcp_server_origin", origin.clone()));
+        }
+        tags
     }
 
     fn pre_tool_use_payload(&self, invocation: &ToolInvocation) -> Option<PreToolUsePayload> {
@@ -251,7 +257,8 @@ fn create_tool_spec(tool_info: &ToolInfo) -> Result<ToolSpec, serde_json::Error>
 
     Ok(ToolSpec::Namespace(ResponsesApiNamespace {
         name: tool_info.callable_namespace.clone(),
-        description,
+        description: take_bytes_at_char_boundary(&description, MAX_MCP_NAMESPACE_DESCRIPTION_BYTES)
+            .to_string(),
         tools: vec![ResponsesApiNamespaceTool::Function(tool)],
     }))
 }

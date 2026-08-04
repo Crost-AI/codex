@@ -1,15 +1,21 @@
 pub mod catalog;
+mod catalog_prompt;
 mod config;
 mod dynamic_skill_selector;
 mod extension;
 mod fragments;
+// Host loading is staged before its crate-internal runtime caller in this PR stack.
+#[allow(dead_code)]
+mod loader;
 pub mod provider;
 mod render;
+mod render_observability;
 mod selection;
 mod shadow_selection_experiment;
 mod sources;
 mod state;
 mod tools;
+mod warnings;
 mod world_state;
 
 pub use config::SkillsExtensionConfig;

@@ -1,19 +1,14 @@
 //! Central approval policy-stage execution and reviewer routing.
 
-use std::sync::Arc;
-
-use crate::guardian::guardian_rejection_message;
 use crate::guardian::guardian_timeout_message;
 use crate::guardian::new_guardian_review_id;
 use crate::guardian::review_approval_request;
 use crate::guardian::routes_approval_to_guardian_with_reviewer;
 use crate::hook_runtime::run_permission_request_hooks;
 use crate::sandboxing::SandboxPermissions;
-use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::flat_tool_name;
 use crate::tools::sandboxing::ApprovalCtx;
-use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
 use codex_config::types::ApprovalsReviewer;
@@ -163,28 +158,41 @@ enum ApprovalResolutionSource {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ApprovalResolution {
     decision: ReviewDecision,
-    rejection: Option<String>,
     source: ApprovalResolutionSource,
 }
 
 impl ApprovalResolution {
     fn into_tool_result(self) -> Result<ReviewDecision, ToolError> {
-        if let Some(rejection) = self.rejection {
-            Err(ToolError::Rejected(rejection))
-        } else {
-            Ok(self.decision)
+        let source = self.source;
+        match self.decision {
+            ReviewDecision::NetworkPolicyAmendment {
+                network_policy_amendment,
+            } if network_policy_amendment.action == NetworkPolicyRuleAction::Deny => {
+                let rejection = match source {
+                    ApprovalResolutionSource::Hook => "rejected by configuration",
+                    ApprovalResolutionSource::Guardian => {
+                        "automatic approval review denied the action"
+                    }
+                    ApprovalResolutionSource::User => "rejected by user",
+                };
+                Err(ToolError::Rejected(rejection.to_string()))
+            }
+            ReviewDecision::Denied { rejection } => Err(ToolError::Rejected(rejection)),
+            ReviewDecision::TimedOut => Err(ToolError::Rejected(guardian_timeout_message())),
+            ReviewDecision::Abort => {
+                Err(ToolError::Rejected("approval request aborted".to_string()))
+            }
+            decision => Ok(decision),
         }
     }
 }
 
-pub(super) async fn resolve_tool_apporval<Rq, Out, T>(
+pub(super) async fn resolve_tool_approval<Rq, Out, T>(
     tool: &mut T,
     req: &Rq,
     permission_request_run_id: &str,
     ctx: ApprovalCtx<'_>,
-    tool_ctx: &ToolCtx,
     reviewer: ApprovalReviewer,
-    otel: &codex_otel::SessionTelemetry,
 ) -> Result<ReviewDecision, ToolError>
 where
     T: ToolRuntime<Rq, Out>,
@@ -201,19 +209,17 @@ where
             Some(PermissionRequestDecision::Allow) => {
                 let resolution = ApprovalResolution {
                     decision: ReviewDecision::Approved,
-                    rejection: None,
                     source: ApprovalResolutionSource::Hook,
                 };
-                record_resolution(otel, tool_ctx, &resolution);
+                record_resolution(&ctx, &resolution);
                 return resolution.into_tool_result();
             }
             Some(PermissionRequestDecision::Deny { message }) => {
                 let resolution = ApprovalResolution {
-                    decision: ReviewDecision::Denied,
-                    rejection: Some(message),
+                    decision: ReviewDecision::denied(message),
                     source: ApprovalResolutionSource::Hook,
                 };
-                record_resolution(otel, tool_ctx, &resolution);
+                record_resolution(&ctx, &resolution);
                 return resolution.into_tool_result();
             }
             None => {}
@@ -231,95 +237,48 @@ where
                 Err(err) => {
                     tracing::error!(%err, "failed to build automatic approval action");
                     let resolution = ApprovalResolution {
-                        decision: ReviewDecision::Abort,
-                        rejection: Some(
-                            "automatic approval review could not prepare the action".to_string(),
+                        decision: ReviewDecision::denied(
+                            "automatic approval review could not prepare the action",
                         ),
                         source: ApprovalResolutionSource::Guardian,
                     };
-                    record_resolution(otel, tool_ctx, &resolution);
+                    record_resolution(&ctx, &resolution);
                     return resolution.into_tool_result();
                 }
             };
-            let decision = review_approval_request(
+            review_approval_request(
                 ctx.session,
                 ctx.turn,
-                review_id.clone(),
+                review_id,
                 action,
                 ctx.retry_reason.clone(),
             )
-            .await;
-            normalize_guardian(ctx.session, review_id, decision).await
+            .await
         }
-        ApprovalReviewer::User => ApprovalResolution {
-            decision: tool.start_approval_async(req, ctx.clone()).await,
-            rejection: None,
-            source: ApprovalResolutionSource::User,
-        },
+        ApprovalReviewer::User => tool.start_approval_async(req, ctx.clone()).await,
     };
-    let resolution = normalize_user_rejection(resolution);
-    record_resolution(otel, tool_ctx, &resolution);
+    let source = match reviewer {
+        ApprovalReviewer::Guardian => ApprovalResolutionSource::Guardian,
+        ApprovalReviewer::User => ApprovalResolutionSource::User,
+    };
+    let resolution = ApprovalResolution {
+        decision: resolution,
+        source,
+    };
+    record_resolution(&ctx, &resolution);
     resolution.into_tool_result()
 }
 
-async fn normalize_guardian(
-    session: &Arc<Session>,
-    review_id: String,
-    decision: ReviewDecision,
-) -> ApprovalResolution {
-    let rejection = match &decision {
-        ReviewDecision::Approved
-        | ReviewDecision::ApprovedForSession
-        | ReviewDecision::ApprovedExecpolicyAmendment { .. } => None,
-        ReviewDecision::NetworkPolicyAmendment {
-            network_policy_amendment,
-        } if network_policy_amendment.action == NetworkPolicyRuleAction::Allow => None,
-        ReviewDecision::TimedOut => Some(guardian_timeout_message()),
-        ReviewDecision::NetworkPolicyAmendment { .. }
-        | ReviewDecision::Denied
-        | ReviewDecision::Abort => {
-            Some(guardian_rejection_message(session.as_ref(), &review_id).await)
-        }
-    };
-    ApprovalResolution {
-        decision,
-        rejection,
-        source: ApprovalResolutionSource::Guardian,
-    }
-}
-
-fn normalize_user_rejection(mut resolution: ApprovalResolution) -> ApprovalResolution {
-    if resolution.source == ApprovalResolutionSource::User {
-        resolution.rejection = match &resolution.decision {
-            ReviewDecision::Approved
-            | ReviewDecision::ApprovedForSession
-            | ReviewDecision::ApprovedExecpolicyAmendment { .. } => None,
-            ReviewDecision::NetworkPolicyAmendment {
-                network_policy_amendment,
-            } if network_policy_amendment.action == NetworkPolicyRuleAction::Allow => None,
-            ReviewDecision::NetworkPolicyAmendment { .. }
-            | ReviewDecision::Denied
-            | ReviewDecision::Abort => Some("rejected by user".to_string()),
-            ReviewDecision::TimedOut => Some("approval request timed out".to_string()),
-        };
-    }
-    resolution
-}
-
-fn record_resolution(
-    otel: &codex_otel::SessionTelemetry,
-    tool_ctx: &ToolCtx,
-    resolution: &ApprovalResolution,
-) {
+fn record_resolution(ctx: &ApprovalCtx<'_>, resolution: &ApprovalResolution) {
     let source = match resolution.source {
         ApprovalResolutionSource::Hook => ToolDecisionSource::Config,
         ApprovalResolutionSource::Guardian => ToolDecisionSource::AutomatedReviewer,
         ApprovalResolutionSource::User => ToolDecisionSource::User,
     };
-    let tool_name = flat_tool_name(&tool_ctx.tool_name);
-    otel.tool_decision(
+    let tool_name = flat_tool_name(ctx.tool_name);
+    ctx.turn.session_telemetry.tool_decision(
         tool_name.as_ref(),
-        &tool_ctx.call_id,
+        ctx.call_id,
         &resolution.decision,
         source,
     );

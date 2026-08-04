@@ -5,7 +5,6 @@ use crate::agent::control::render_input_preview;
 use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
-use crate::agent::role::apply_role_to_config;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v1;
 use codex_tools::ToolSpec;
@@ -47,11 +46,12 @@ async fn handle_spawn_agent(
 ) -> Result<SpawnAgentResult, FunctionCallError> {
     let ToolInvocation {
         session,
-        turn,
+        step_context,
         payload,
         call_id,
         ..
     } = invocation;
+    let turn = &step_context.turn;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
     let role_name = args
@@ -71,7 +71,7 @@ async fn handle_spawn_agent(
     }
     session
         .emit_turn_item_started(
-            &turn,
+            turn,
             &TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
                 id: call_id.clone(),
                 tool: CollabAgentTool::SpawnAgent,
@@ -92,23 +92,18 @@ async fn handle_spawn_agent(
         config.service_tier = Some(service_tier.clone());
     }
     if args.fork_context {
-        reject_full_fork_spawn_overrides(
-            role_name,
-            args.model.as_deref(),
-            args.reasoning_effort.clone(),
-        )?;
-    } else {
-        apply_requested_spawn_agent_model_overrides(
-            &session,
-            turn.as_ref(),
-            &mut config,
-            args.model.as_deref(),
-            args.reasoning_effort.clone(),
-        )
-        .await?;
-        apply_role_to_config(&mut config, role_name)
-            .await
-            .map_err(FunctionCallError::RespondToModel)?;
+        reject_full_fork_agent_type_override(role_name)?;
+    }
+    apply_requested_spawn_agent_model_overrides(
+        &session,
+        turn.as_ref(),
+        &mut config,
+        args.model.as_deref(),
+        args.reasoning_effort.clone(),
+    )
+    .await?;
+    if !args.fork_context {
+        apply_spawn_agent_role(&session, &mut config, role_name).await?;
     }
     apply_spawn_agent_service_tier(
         &session,
@@ -133,7 +128,8 @@ async fn handle_spawn_agent(
             fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
             fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
             parent_thread_id: Some(session.thread_id),
-            environments: Some(turn.environments.to_selections()),
+            parent_turn_id: Some(turn.sub_id.clone()),
+            environments: Some(step_context.environments.to_selections()),
         },
     ))
     .await
@@ -193,7 +189,7 @@ async fn handle_spawn_agent(
         .unwrap_or_default();
     session
         .emit_turn_item_completed(
-            &turn,
+            turn,
             TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
                 id: call_id,
                 tool: CollabAgentTool::SpawnAgent,

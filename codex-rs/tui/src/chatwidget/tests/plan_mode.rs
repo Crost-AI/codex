@@ -649,6 +649,7 @@ async fn request_user_input_notification_overrides_pending_agent_turn_complete_n
                 description: "Update only Plan mode.".to_string(),
             }]),
         }],
+        is_blocking: true,
         auto_resolution_ms: None,
     });
 
@@ -679,6 +680,7 @@ async fn handle_request_user_input_sets_pending_notification() {
                 description: "Update only Plan mode.".to_string(),
             }]),
         }],
+        is_blocking: true,
         auto_resolution_ms: None,
     });
 
@@ -1172,6 +1174,28 @@ async fn plan_completion_restores_status_indicator_after_streaming_plan_output()
 
     assert_eq!(chat.bottom_pane.status_indicator_visible(), true);
     assert_eq!(chat.bottom_pane.is_task_running(), true);
+}
+
+#[tokio::test]
+async fn unterminated_plan_delta_does_not_redraw_unchanged_stream_tail() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
+    let plan_mask = collaboration_modes::mask_for_kind(chat.model_catalog.as_ref(), ModeKind::Plan)
+        .expect("expected plan collaboration mask");
+    chat.set_collaboration_mask(plan_mask);
+    chat.on_plan_delta("| Step | Owner |\n".to_string());
+    assert!(chat.active_cell_is_stream_tail());
+    let revision = chat.transcript.active_cell_revision;
+
+    let (frame_requester, mut draw_rx) = FrameRequester::test_channel();
+    chat.frame_requester = frame_requester;
+    chat.on_plan_delta("| partial".to_string());
+
+    assert_eq!(chat.transcript.active_cell_revision, revision);
+    assert!(matches!(
+        draw_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
 }
 
 #[tokio::test]

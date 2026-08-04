@@ -96,6 +96,7 @@ pub use tool_discovery::filter_request_plugin_install_discoverable_tools_for_cli
 pub use tool_executor::ToolExecutor;
 pub use tool_executor::ToolExecutorFuture;
 pub use tool_executor::ToolExposure;
+pub use tool_executor::ToolExposures;
 pub use tool_output::JsonToolOutput;
 pub use tool_output::ToolOutput;
 pub use tool_payload::ToolPayload;
@@ -105,3 +106,4 @@ pub use tool_spec::ResponsesApiWebSearchFilters;
 pub use tool_spec::ResponsesApiWebSearchUserLocation;
 pub use tool_spec::ToolSpec;
 pub use tool_spec::create_tools_json_for_responses_api;
+pub use tool_spec::create_tools_raw_json_for_responses_api;

@@ -1,3 +1,19 @@
+mod model;
+mod parser;
+
+pub use model::EnvironmentSkillMetadata;
+pub use model::SkillConfigRule;
+pub use model::SkillConfigRuleSelector;
+pub use model::SkillConfigRules;
+pub use model::SkillDependencies;
+pub use model::SkillInterface;
+pub use model::SkillMetadata;
+pub use model::SkillPolicy;
+pub use model::SkillToolDependency;
+pub use parser::ParsedSkillFrontmatter;
+pub use parser::SkillParseError;
+pub use parser::parse_skill_frontmatter_metadata;
+
 use codex_utils_absolute_path::AbsolutePathBuf;
 use include_dir::Dir;
 use std::collections::hash_map::DefaultHasher;

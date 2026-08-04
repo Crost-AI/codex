@@ -7,7 +7,7 @@ retry with an escalated sandbox strategy on denial (no re‑approval thanks to
 caching).
 */
 use super::approvals::ApprovalReviewer;
-use super::approvals::resolve_tool_apporval;
+use super::approvals::resolve_tool_approval;
 use crate::network_policy_decision::network_approval_context_from_payload;
 use crate::tools::flat_tool_name;
 use crate::tools::network_approval::ActiveNetworkApproval;
@@ -27,7 +27,7 @@ use crate::tools::sandboxing::default_exec_approval_requirement;
 use crate::tools::sandboxing::sandbox_override_for_first_attempt;
 use crate::tools::sandboxing::unsandboxed_execution_allowed;
 use codex_otel::ToolDecisionSource;
-use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::SandboxErr;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::protocol::AskForApproval;
@@ -67,7 +67,6 @@ impl ToolOrchestrator {
             &tool_ctx.session,
             &tool_ctx.turn.sub_id,
             managed_network_active,
-            attempt.sandbox,
             tool.network_approval_spec(req, tool_ctx),
         )
         .await
@@ -161,8 +160,7 @@ impl ToolOrchestrator {
         let permissions = permission_profile
             .clone()
             .materialize_project_roots_with_workspace_roots(&materialized_workspace_roots);
-        let (file_system_sandbox_policy, network_sandbox_policy) =
-            permissions.to_runtime_permissions();
+        let file_system_sandbox_policy = permissions.file_system_sandbox_policy();
         let requirement = tool.exec_approval_requirement(req).unwrap_or_else(|| {
             default_exec_approval_requirement(approval_policy, &file_system_sandbox_policy)
         });
@@ -173,17 +171,16 @@ impl ToolOrchestrator {
                         session: &tool_ctx.session,
                         turn: &tool_ctx.turn,
                         call_id: &tool_ctx.call_id,
+                        tool_name: &tool_ctx.tool_name,
                         retry_reason: None,
                         network_approval_context: None,
                     };
-                    resolve_tool_apporval(
+                    resolve_tool_approval(
                         tool,
                         req,
                         tool_ctx.call_id.as_str(),
                         approval_ctx,
-                        tool_ctx,
                         ApprovalReviewer::Guardian,
-                        &otel,
                     )
                     .await?;
                     already_approved = true;
@@ -204,21 +201,20 @@ impl ToolOrchestrator {
                     session: &tool_ctx.session,
                     turn: &tool_ctx.turn,
                     call_id: &tool_ctx.call_id,
+                    tool_name: &tool_ctx.tool_name,
                     retry_reason: reason.clone(),
                     network_approval_context: None,
                 };
-                resolve_tool_apporval(
+                resolve_tool_approval(
                     tool,
                     req,
                     tool_ctx.call_id.as_str(),
                     approval_ctx,
-                    tool_ctx,
                     if strict_auto_review {
                         ApprovalReviewer::Guardian
                     } else {
                         ApprovalReviewer::for_turn(turn_ctx)
                     },
-                    &otel,
                 )
                 .await?;
                 already_approved = true;
@@ -236,16 +232,14 @@ impl ToolOrchestrator {
         let sandbox_requested = match sandbox_override {
             SandboxOverride::BypassSandboxFirstAttempt => false,
             SandboxOverride::NoOverride => self.sandbox.should_sandbox(
-                &file_system_sandbox_policy,
-                network_sandbox_policy,
+                &permissions,
                 sandbox_preference,
                 managed_network_active,
             ),
         };
         let initial_sandbox = if sandbox_requested {
             self.sandbox.select_initial(
-                &file_system_sandbox_policy,
-                network_sandbox_policy,
+                &permissions,
                 sandbox_preference,
                 turn_ctx.windows_sandbox_level,
                 managed_network_active,
@@ -299,10 +293,24 @@ impl ToolOrchestrator {
                     deferred_network_approval: first_deferred_network_approval,
                 })
             }
-            Err(ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied {
-                output,
-                network_policy_decision,
-            }))) => {
+            Err(ToolError::Codex(err)) => {
+                let CodexErrorDetails::Sandbox(SandboxErr::Denied {
+                    output,
+                    network_policy_decision,
+                }) = err.details()
+                else {
+                    let err = ToolError::Codex(err);
+                    if let Some(outcome) = sandbox_outcome_from_tool_error(&err) {
+                        otel.sandbox_outcome(
+                            &otel_tn,
+                            otel_ci,
+                            outcome,
+                            initial_duration,
+                            /*escalated_duration*/ None,
+                        );
+                    }
+                    return Err(err);
+                };
                 let network_approval_context = if managed_network_active {
                     network_policy_decision
                         .as_ref()
@@ -318,10 +326,7 @@ impl ToolOrchestrator {
                         initial_duration,
                         /*escalated_duration*/ None,
                     );
-                    return Err(ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied {
-                        output,
-                        network_policy_decision,
-                    })));
+                    return Err(ToolError::Codex(err));
                 }
                 if !tool.escalate_on_failure() {
                     otel.sandbox_outcome(
@@ -331,10 +336,7 @@ impl ToolOrchestrator {
                         initial_duration,
                         /*escalated_duration*/ None,
                     );
-                    return Err(ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied {
-                        output,
-                        network_policy_decision,
-                    })));
+                    return Err(ToolError::Codex(err));
                 }
                 let unsandboxed_allowed =
                     unsandboxed_execution_allowed(&file_system_sandbox_policy);
@@ -360,10 +362,7 @@ impl ToolOrchestrator {
                             initial_duration,
                             /*escalated_duration*/ None,
                         );
-                        return Err(ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied {
-                            output,
-                            network_policy_decision,
-                        })));
+                        return Err(ToolError::Codex(err));
                     }
                 }
                 if !unsandboxed_allowed && network_approval_context.is_none() {
@@ -374,10 +373,7 @@ impl ToolOrchestrator {
                         initial_duration,
                         /*escalated_duration*/ None,
                     );
-                    return Err(ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied {
-                        output,
-                        network_policy_decision,
-                    })));
+                    return Err(ToolError::Codex(err));
                 }
                 let retry_reason =
                     if let Some(network_approval_context) = network_approval_context.as_ref() {
@@ -399,38 +395,35 @@ impl ToolOrchestrator {
                         session: &tool_ctx.session,
                         turn: &tool_ctx.turn,
                         call_id: &tool_ctx.call_id,
+                        tool_name: &tool_ctx.tool_name,
                         retry_reason: Some(retry_reason),
                         network_approval_context: network_approval_context.clone(),
                     };
 
                     let permission_request_run_id = format!("{}:retry", tool_ctx.call_id);
-                    resolve_tool_apporval(
+                    resolve_tool_approval(
                         tool,
                         req,
                         &permission_request_run_id,
                         approval_ctx,
-                        tool_ctx,
                         if strict_auto_review {
                             ApprovalReviewer::Guardian
                         } else {
                             ApprovalReviewer::for_turn(turn_ctx)
                         },
-                        &otel,
                     )
                     .await?;
                 }
 
                 let retry_sandbox_requested = !unsandboxed_allowed
                     && self.sandbox.should_sandbox(
-                        &file_system_sandbox_policy,
-                        network_sandbox_policy,
+                        &permissions,
                         sandbox_preference,
                         managed_network_active,
                     );
                 let retry_sandbox = if retry_sandbox_requested {
                     self.sandbox.select_initial(
-                        &file_system_sandbox_policy,
-                        network_sandbox_policy,
+                        &permissions,
                         sandbox_preference,
                         turn_ctx.windows_sandbox_level,
                         managed_network_active,
@@ -515,10 +508,13 @@ impl ToolOrchestrator {
 
 fn sandbox_outcome_from_tool_error(err: &ToolError) -> Option<&'static str> {
     match err {
-        ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied { .. })) => Some("denied"),
-        ToolError::Codex(CodexErr::Sandbox(SandboxErr::Timeout { .. })) => Some("timed_out"),
-        ToolError::Codex(CodexErr::Sandbox(SandboxErr::Signal(_))) => Some("signal"),
-        ToolError::Rejected(_) | ToolError::Codex(_) => None,
+        ToolError::Codex(err) => match err.details() {
+            CodexErrorDetails::Sandbox(SandboxErr::Denied { .. }) => Some("denied"),
+            CodexErrorDetails::Sandbox(SandboxErr::Timeout { .. }) => Some("timed_out"),
+            CodexErrorDetails::Sandbox(SandboxErr::Signal(_)) => Some("signal"),
+            _ => None,
+        },
+        ToolError::Rejected(_) => None,
     }
 }
 
