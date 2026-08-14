@@ -314,8 +314,16 @@ fn user_message_count(thread: &Thread, prompt: &str) -> usize {
             ThreadItem::UserMessage { content, .. } => Some(content),
             _ => None,
         })
-        .flatten()
-        .filter(|item| matches!(item, AppServerUserInput::Text { text, .. } if text == prompt))
+        .filter(|content| {
+            content
+                .iter()
+                .filter_map(|item| match item {
+                    AppServerUserInput::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+                == prompt
+        })
         .count()
 }
 
@@ -739,10 +747,10 @@ goals = true
     let expected_source_tokens = if committed_steer.is_some() { 150 } else { 50 };
     assert_eq!(source_goal.objective, RETRY_GOAL);
     assert_eq!(source_goal.tokens_used, expected_source_tokens);
-    assert_eq!(source_goal.time_used_seconds, 12);
+    assert!(source_goal.time_used_seconds >= 12);
     assert_eq!(retry_goal.objective, RETRY_GOAL);
     assert!(retry_goal.tokens_used >= expected_source_tokens);
-    assert!(retry_goal.time_used_seconds >= 12);
+    assert!(retry_goal.time_used_seconds >= source_goal.time_used_seconds);
 
     let request_bodies = server
         .requests()

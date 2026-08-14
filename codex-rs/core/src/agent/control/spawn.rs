@@ -2,6 +2,8 @@ use super::residency::is_v2_resident_session_source;
 use super::*;
 use crate::agent::role::apply_role_to_config_for_multi_agent_v2;
 use crate::config::PermissionProfileSnapshot;
+use crate::context::ContextualUserFragment;
+use crate::context::CurrentTimeReminder;
 use codex_extension_api::ExtensionDataInit;
 
 const AGENT_NAMES: &str = include_str!("../agent_names.txt");
@@ -17,6 +19,7 @@ struct SpawnAgentThreadInheritance {
 /// submission and lifecycle logging cannot receive one without the other. Other spawn sources
 /// provide user input directly, making an uncontextualized inter-agent communication
 /// unrepresentable.
+#[allow(clippy::large_enum_variant)]
 enum SpawnInitialInput {
     UserInput(Vec<UserInput>),
     InterAgentCommunication(InterAgentCommunication, AgentCommunicationContext),
@@ -46,13 +49,12 @@ pub(super) fn agent_nickname_candidates(config: &Config, role_name: Option<&str>
 
 fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item: bool) -> bool {
     match item {
-        RolloutItem::ResponseItem(ResponseItem::Message { role, phase, .. }) => match role.as_str()
-        {
-            "system" | "developer" | "user" => true,
-            "assistant" => *phase == Some(MessagePhase::FinalAnswer),
-            _ => false,
-        },
-        RolloutItem::ResponseItem(
+        RolloutItem::ResponseItem(envelope) => match &envelope.item {
+            ResponseItem::Message { role, phase, .. } => match role.as_str() {
+                "system" | "developer" | "user" => true,
+                "assistant" => *phase == Some(MessagePhase::FinalAnswer),
+                _ => false,
+            },
             ResponseItem::AdditionalTools { .. }
             | ResponseItem::AgentMessage { .. }
             | ResponseItem::Reasoning { .. }
@@ -68,10 +70,11 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
             | ResponseItem::Compaction { .. }
             | ResponseItem::CompactionTrigger { .. }
             | ResponseItem::ContextCompaction { .. }
-            | ResponseItem::Other,
-        ) => false,
+            | ResponseItem::Other => false,
+        },
         RolloutItem::InterAgentCommunication(_)
-        | RolloutItem::InterAgentCommunicationMetadata { .. } => false,
+        | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::SecurityRiskScore(_) => false,
         // Full-history forks preserve the cached prompt prefix and can keep diffing
         // from the parent's durable baseline. Truncated forks drop part of that prompt,
         // so they must rebuild context on their first child turn.
@@ -80,7 +83,7 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
     }
 }
 
-fn is_multi_agent_v2_usage_hint_message(item: &ResponseItem, usage_hint_texts: &[String]) -> bool {
+fn is_fork_excluded_developer_message(item: &ResponseItem, usage_hint_texts: &[String]) -> bool {
     let ResponseItem::Message { role, content, .. } = item else {
         return false;
     };
@@ -91,9 +94,10 @@ fn is_multi_agent_v2_usage_hint_message(item: &ResponseItem, usage_hint_texts: &
         return false;
     };
 
-    usage_hint_texts
-        .iter()
-        .any(|usage_hint_text| usage_hint_text == text)
+    CurrentTimeReminder::matches_text(text)
+        || usage_hint_texts
+            .iter()
+            .any(|usage_hint_text| usage_hint_text == text)
 }
 
 async fn load_agent_model_context(
@@ -269,6 +273,7 @@ impl AgentControl {
             })
             .await?;
         let stored_model = stored_thread.model.clone();
+        let stored_model_provider = stored_thread.model_provider.clone();
         let stored_source = stored_thread.source.clone();
         let stored_parent_thread_id = stored_thread.parent_thread_id;
         let history = load_agent_model_context(&state, thread_id, stored_thread.history_mode)
@@ -323,6 +328,18 @@ impl AgentControl {
         }
         if let Some(model) = stored_model {
             config.model = Some(model);
+        }
+        if config.model_provider_id != stored_model_provider {
+            config.model_provider = config
+                .model_providers
+                .get(&stored_model_provider)
+                .cloned()
+                .ok_or_else(|| {
+                    CodexErr::InvalidRequest(format!(
+                        "Model provider `{stored_model_provider}` not found"
+                    ))
+                })?;
+            config.model_provider_id = stored_model_provider;
         }
         let residency_slot = self
             .reserve_v2_residency_slot(&state, &config, Some(thread_id))
@@ -531,11 +548,11 @@ impl AgentControl {
 
         match initial_input {
             SpawnInitialInput::UserInput(input) => {
-                self.send_input_after_capacity_check(
+                self.send_input(
                     new_thread.thread_id,
-                    &state,
                     input,
                     options.parent_turn_id,
+                    options.root_turn_id,
                 )
                 .await?;
             }
@@ -546,6 +563,7 @@ impl AgentControl {
                     communication,
                     context,
                     options.parent_turn_id,
+                    options.root_turn_id,
                 )
                 .await?;
             }
@@ -612,7 +630,9 @@ impl AgentControl {
                 .subagent_developer_instructions
                 .as_ref(),
         ) {
-            (MultiAgentVersion::V2, Some(_)) => {
+            (MultiAgentVersion::V2, override_instructions)
+                if override_instructions.is_some() || session_source.get_agent_role().is_some() =>
+            {
                 let parent_developer_instructions = match parent_thread
                     .session
                     .new_default_turn()
@@ -629,7 +649,7 @@ impl AgentControl {
                 )
             }
             (MultiAgentVersion::Disabled | MultiAgentVersion::V1, _)
-            | (MultiAgentVersion::V2, None) => (None, None),
+            | (MultiAgentVersion::V2, _) => (None, None),
         };
         let parent_history_mode = parent_thread.config_snapshot().await.history_mode;
         // `record_conversation_items` only queues persistence writes asynchronously.
@@ -703,7 +723,7 @@ impl AgentControl {
             if matches!(response_item, ResponseItem::AgentMessage { .. }) {
                 return false;
             }
-            if is_multi_agent_v2_usage_hint_message(
+            if is_fork_excluded_developer_message(
                 response_item,
                 &multi_agent_v2_usage_hint_texts_to_filter,
             ) {
@@ -778,6 +798,7 @@ impl AgentControl {
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::WorldState(_) => true,
+                RolloutItem::SecurityRiskScore(_) => false,
             }
         });
         // Full forks reuse the parent's reference context instead of rebuilding it. If that
@@ -797,7 +818,7 @@ impl AgentControl {
                     subagent_developer_instructions.clone(),
                 ])
         {
-            forked_rollout_items.push(RolloutItem::ResponseItem(developer_message));
+            forked_rollout_items.push(RolloutItem::ResponseItem(developer_message.into()));
         }
         if preserve_reference_context_item
             && multi_agent_version == MultiAgentVersion::V2
@@ -808,7 +829,9 @@ impl AgentControl {
                     subagent_usage_hint_text,
                 ])
         {
-            forked_rollout_items.push(RolloutItem::ResponseItem(subagent_usage_hint_message));
+            forked_rollout_items.push(RolloutItem::ResponseItem(
+                subagent_usage_hint_message.into(),
+            ));
         }
         let mut thread_extension_init = ExtensionDataInit::new();
         thread_extension_init.insert(selected_capability_roots);

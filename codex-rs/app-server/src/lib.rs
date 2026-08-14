@@ -3,6 +3,7 @@
 
 use codex_arg0::Arg0DispatchPaths;
 use codex_code_mode::CodeModeSessionProvider;
+use codex_code_mode::GrpcCodeModeSessionProvider;
 use codex_code_mode::WebSocketCodeModeSessionProvider;
 use codex_config::LoaderOverrides;
 use codex_config::NoopThreadConfigLoader;
@@ -111,6 +112,7 @@ mod mcp_refresh;
 mod message_processor;
 mod models;
 mod models_refresh_worker;
+mod otel_reloader;
 mod outgoing_message;
 mod request_processors;
 mod request_serialization;
@@ -504,7 +506,9 @@ pub async fn run_main_with_transport_options(
             config_manager
                 .replace_thread_config_loader(Arc::clone(&discovered_thread_config_loader));
             let auth_manager =
-                AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+                AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
+                    .await
+                    .map_err(std::io::Error::other)?;
             config_manager.replace_cloud_config_bundle_loader(
                 auth_manager,
                 config.chatgpt_base_url.clone(),
@@ -539,6 +543,7 @@ pub async fn run_main_with_transport_options(
             })?
         }
     };
+    config.auth_config().validate()?;
     let code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>> =
         match &runtime_options.code_mode_host_transport {
             CodeModeHostTransport::Local => None,
@@ -551,6 +556,20 @@ pub async fn run_main_with_transport_options(
                 }
                 Some(Arc::new(
                     WebSocketCodeModeSessionProvider::with_http_client_factory(
+                        url.to_string(),
+                        config.http_client_factory(),
+                    ),
+                ))
+            }
+            CodeModeHostTransport::Grpc(url) => {
+                if !config.features.enabled(Feature::CodeModeHost) {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidInput,
+                        "remote code-mode host requires the code_mode_host feature to be enabled",
+                    ));
+                }
+                Some(Arc::new(
+                    GrpcCodeModeSessionProvider::with_http_client_factory(
                         url.to_string(),
                         config.http_client_factory(),
                     ),
@@ -663,15 +682,13 @@ pub async fn run_main_with_transport_options(
     let log_db_layer = log_db
         .clone()
         .map(|layer| layer.with_filter(log_db::default_filter()));
-    let otel_logger_layer = otel.as_ref().and_then(|o| o.logger_layer());
-    let otel_tracing_layer = otel.as_ref().and_then(|o| o.tracing_layer());
+    let (otel_layers, otel_logger_reload_handle) = otel_reloader::layers(otel.as_ref());
     let _ = tracing_subscriber::registry()
         .with(stderr_fmt)
         .with(feedback_layer)
         .with(feedback_metadata_layer)
         .with(log_db_layer)
-        .with(otel_logger_layer)
-        .with(otel_tracing_layer)
+        .with(otel_layers)
         .try_init();
     for warning in &config_warnings {
         match &warning.details {
@@ -745,7 +762,9 @@ pub async fn run_main_with_transport_options(
     drop(unix_socket_startup_lock);
 
     let auth_manager =
-        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
+            .await
+            .map_err(std::io::Error::other)?;
 
     let remote_control_enabled = remote_control_policy == RemoteControlPolicy::Allowed
         && remote_control_explicitly_requested
@@ -811,6 +830,15 @@ pub async fn run_main_with_transport_options(
         }
     }
     transport_accept_handles.push(remote_control_accept_handle);
+
+    let otel_reloader_handle = otel_reloader::spawn(
+        otel,
+        otel_logger_reload_handle,
+        config_manager.clone(),
+        Arc::clone(&auth_manager),
+        default_analytics_enabled,
+        transport_shutdown_token.clone(),
+    );
 
     let outbound_handle = tokio::spawn(async move {
         let mut outbound_connections = HashMap::<ConnectionId, OutboundConnectionState>::new();
@@ -1172,12 +1200,9 @@ pub async fn run_main_with_transport_options(
     let _ = outbound_handle.await;
 
     transport_shutdown_token.cancel();
+    let _ = otel_reloader_handle.await;
     for handle in transport_accept_handles {
         let _ = handle.await;
-    }
-
-    if let Some(otel) = otel {
-        otel.shutdown();
     }
 
     Ok(())

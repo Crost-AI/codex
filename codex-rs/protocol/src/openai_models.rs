@@ -6,6 +6,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use chrono::DateTime;
+use chrono::Utc;
 use schemars::JsonSchema;
 use schemars::r#gen::SchemaGenerator;
 use schemars::schema::InstanceType;
@@ -32,6 +34,8 @@ use crate::config_types::Verbosity;
 use crate::protocol::MultiAgentVersion;
 
 const PERSONALITY_PLACEHOLDER: &str = "{{ personality }}";
+/// Backend model-catalog specialty identifying cybersecurity-focused models.
+pub const MODEL_SPECIALTY_CYBER: &str = "cyber";
 pub const SPEED_TIER_FAST: &str = "fast";
 
 /// See https://platform.openai.com/docs/guides/reasoning?api-mode=responses#get-started-with-reasoning
@@ -185,6 +189,15 @@ pub struct ModelUpgrade {
     pub model_link: Option<String>,
     pub upgrade_copy: Option<String>,
     pub migration_markdown: Option<String>,
+    /// Informational time when the model associated with this upgrade is scheduled to retire.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_rfc3339_timestamp"
+    )]
+    #[schemars(with = "Option<String>")]
+    #[ts(type = "string", optional)]
+    pub retirement_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
@@ -210,6 +223,8 @@ pub struct ModelPreset {
     pub display_name: String,
     /// Short human description shown in UIs.
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_specialty: Option<String>,
     /// Reasoning effort applied when none is explicitly chosen.
     pub default_reasoning_effort: ReasoningEffort,
     /// Supported reasoning effort options.
@@ -392,6 +407,8 @@ pub struct ModelInfo {
     pub include_skills_usage_instructions: bool,
     #[serde(default)]
     pub include_plugin_usage_instructions: bool,
+    #[serde(default = "default_true")]
+    pub include_apps_usage_instructions: bool,
     /// Whether the model accepts the Responses API `reasoning.summary` parameter.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub supports_reasoning_summary_parameter: bool,
@@ -403,7 +420,6 @@ pub struct ModelInfo {
     #[serde(default)]
     pub web_search_tool_type: WebSearchToolType,
     pub truncation_policy: TruncationPolicyConfig,
-    pub supports_parallel_tool_calls: bool,
     #[serde(default)]
     pub supports_image_detail_original: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -436,8 +452,14 @@ pub struct ModelInfo {
     pub supports_search_tool: bool,
     #[serde(default)]
     pub use_responses_lite: bool,
+    #[serde(default)]
+    pub node_repl_auto_review_required: bool,
+    #[serde(default)]
+    pub node_repl_disabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_review_model_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_specialty: Option<String>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -604,6 +626,29 @@ impl ModelInstructionsVariables {
 pub struct ModelInfoUpgrade {
     pub model: String,
     pub migration_markdown: String,
+    /// Informational time when the model associated with this upgrade is scheduled to retire.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_rfc3339_timestamp"
+    )]
+    #[schemars(with = "Option<String>")]
+    #[ts(type = "string", optional)]
+    pub retirement_at: Option<DateTime<Utc>>,
+}
+
+fn deserialize_optional_rfc3339_timestamp<'de, D>(
+    deserializer: D,
+) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc)))
 }
 
 impl From<&ModelUpgrade> for ModelInfoUpgrade {
@@ -611,6 +656,7 @@ impl From<&ModelUpgrade> for ModelInfoUpgrade {
         ModelInfoUpgrade {
             model: upgrade.id.clone(),
             migration_markdown: upgrade.migration_markdown.clone().unwrap_or_default(),
+            retirement_at: upgrade.retirement_at,
         }
     }
 }
@@ -721,6 +767,7 @@ impl From<ModelInfo> for ModelPreset {
             model: info.slug.clone(),
             display_name: info.display_name,
             description: info.description.unwrap_or_default(),
+            model_specialty: info.model_specialty,
             default_reasoning_effort: info
                 .default_reasoning_level
                 .unwrap_or(ReasoningEffort::None),
@@ -737,6 +784,7 @@ impl From<ModelInfo> for ModelPreset {
                 model_link: None,
                 upgrade_copy: None,
                 migration_markdown: Some(upgrade.migration_markdown.clone()),
+                retirement_at: upgrade.retirement_at,
             }),
             show_in_picker: info.visibility == ModelVisibility::List,
             multi_agent_version: info.multi_agent_version,
@@ -826,6 +874,7 @@ mod tests {
             model_messages: spec,
             include_skills_usage_instructions: false,
             include_plugin_usage_instructions: false,
+            include_apps_usage_instructions: false,
             supports_reasoning_summary_parameter: true,
             default_reasoning_summary: ReasoningSummary::Auto,
             support_verbosity: false,
@@ -833,7 +882,6 @@ mod tests {
             apply_patch_tool_type: None,
             web_search_tool_type: WebSearchToolType::Text,
             truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
-            supports_parallel_tool_calls: false,
             supports_image_detail_original: false,
             context_window: None,
             max_context_window: None,
@@ -845,7 +893,10 @@ mod tests {
             used_fallback_model_metadata: false,
             supports_search_tool: false,
             use_responses_lite: false,
+            node_repl_auto_review_required: false,
+            node_repl_disabled: false,
             auto_review_model_override: None,
+            model_specialty: None,
             tool_mode: None,
             multi_agent_version: None,
         }
@@ -1402,7 +1453,6 @@ mod tests {
                 "mode": "bytes",
                 "limit": 10000
             },
-            "supports_parallel_tool_calls": false,
             "supports_image_detail_original": false,
             "context_window": null,
             "auto_compact_token_limit": null,
@@ -1418,14 +1468,123 @@ mod tests {
         );
         assert!(!model.include_skills_usage_instructions);
         assert!(!model.include_plugin_usage_instructions);
+        assert!(model.include_apps_usage_instructions);
         assert!(model.supports_reasoning_summary_parameter);
         assert!(!model.supports_image_detail_original);
         assert_eq!(model.web_search_tool_type, WebSearchToolType::Text);
         assert!(!model.supports_search_tool);
         assert!(!model.use_responses_lite);
+        assert!(!model.node_repl_auto_review_required);
+        assert!(!model.node_repl_disabled);
         assert_eq!(model.comp_hash, None);
         assert_eq!(model.auto_review_model_override, None);
         assert_eq!(model.tool_mode, None);
+    }
+
+    #[test]
+    fn model_info_deserializes_optional_upgrade_retirement_at() {
+        let base = serde_json::to_value(test_model(/*spec*/ None))
+            .expect("serialize test model without retirement time");
+
+        let mut absent = base.clone();
+        absent
+            .as_object_mut()
+            .expect("model info should be an object")
+            .insert(
+                "upgrade".to_string(),
+                serde_json::json!({
+                    "model": "replacement-model",
+                    "migration_markdown": "Use the replacement model."
+                }),
+            );
+        let absent = serde_json::from_value::<ModelInfo>(absent)
+            .expect("deserialize model info without upgrade retirement time");
+        assert_eq!(
+            absent
+                .upgrade
+                .as_ref()
+                .and_then(|upgrade| upgrade.retirement_at.as_ref())
+                .map(DateTime::timestamp),
+            None
+        );
+
+        let mut null = base.clone();
+        null.as_object_mut()
+            .expect("model info should be an object")
+            .insert(
+                "upgrade".to_string(),
+                serde_json::json!({
+                    "model": "replacement-model",
+                    "migration_markdown": "Use the replacement model.",
+                    "retirement_at": null
+                }),
+            );
+        let null = serde_json::from_value::<ModelInfo>(null)
+            .expect("deserialize model info with null upgrade retirement time");
+        assert_eq!(
+            null.upgrade
+                .as_ref()
+                .and_then(|upgrade| upgrade.retirement_at.as_ref())
+                .map(DateTime::timestamp),
+            None
+        );
+
+        let mut populated = base;
+        populated
+            .as_object_mut()
+            .expect("model info should be an object")
+            .insert(
+                "upgrade".to_string(),
+                serde_json::json!({
+                    "model": "replacement-model",
+                    "migration_markdown": "Use the replacement model.",
+                    "retirement_at": "2030-01-01T00:00:00Z"
+                }),
+            );
+        let populated = serde_json::from_value::<ModelInfo>(populated)
+            .expect("deserialize model info with upgrade retirement time");
+        assert_eq!(
+            populated
+                .upgrade
+                .as_ref()
+                .and_then(|upgrade| upgrade.retirement_at.as_ref())
+                .map(DateTime::timestamp),
+            Some(1_893_456_000)
+        );
+
+        let mut malformed = serde_json::to_value(test_model(/*spec*/ None))
+            .expect("serialize test model for malformed retirement time");
+        malformed
+            .as_object_mut()
+            .expect("model info should be an object")
+            .insert(
+                "upgrade".to_string(),
+                serde_json::json!({
+                    "model": "replacement-model",
+                    "migration_markdown": "Use the replacement model.",
+                    "retirement_at": "not-a-timestamp"
+                }),
+            );
+        let malformed = serde_json::from_value::<ModelInfo>(malformed)
+            .expect("tolerate malformed upgrade retirement time");
+        assert_eq!(
+            malformed
+                .upgrade
+                .as_ref()
+                .and_then(|upgrade| upgrade.retirement_at.as_ref())
+                .map(DateTime::timestamp),
+            None
+        );
+    }
+
+    #[test]
+    fn model_info_preserves_explicit_apps_guidance_opt_out() {
+        let value = serde_json::to_value(test_model(/*spec*/ None))
+            .expect("serialize model info with explicit apps guidance opt-out");
+        assert_eq!(value["include_apps_usage_instructions"], false);
+
+        let model = serde_json::from_value::<ModelInfo>(value).expect("deserialize model info");
+        assert!(!model.include_apps_usage_instructions);
     }
 
     #[test]

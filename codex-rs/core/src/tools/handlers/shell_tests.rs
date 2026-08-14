@@ -9,11 +9,12 @@ use crate::config::PermissionProfileSnapshot;
 use crate::exec_env::CODEX_PERMISSION_PROFILE_ENV_VAR;
 use crate::exec_env::create_env;
 use crate::exec_env::inject_permission_profile_env;
+use crate::exec_env::inject_session_id_env;
 use crate::sandboxing::SandboxPermissions;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
-use crate::session::turn_context::EnvironmentConfig;
 use crate::session::turn_context::TurnEnvironment;
+use crate::session::turn_context::TurnEnvironmentConfig;
 use crate::shell::Shell;
 use crate::shell::ShellType;
 use crate::tools::context::FunctionToolOutput;
@@ -24,6 +25,8 @@ use crate::tools::handlers::ShellCommandHandler;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::CoreToolRuntime;
 use crate::turn_diff_tracker::TurnDiffTracker;
+use codex_protocol::protocol::EnvironmentConfigState;
+use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_shell_command::is_safe_command::is_known_safe_command;
 use codex_shell_command::powershell::try_find_powershell_executable_blocking;
 use codex_shell_command::powershell::try_find_pwsh_executable_blocking;
@@ -81,8 +84,8 @@ async fn shell_command_handler_to_exec_params_uses_selected_environment() {
     Arc::make_mut(&mut turn_context.config)
         .permissions
         .set_permission_profile_from_session_snapshot(PermissionProfileSnapshot::active(
-            permission_profile,
-            ActivePermissionProfile::new("test-profile"),
+            permission_profile.clone(),
+            ActivePermissionProfile::new("thread-profile"),
         ))
         .expect("set active permission profile");
 
@@ -100,8 +103,14 @@ async fn shell_command_handler_to_exec_params_uses_selected_environment() {
     let expected_command = selected_shell.derive_exec_args(&command, /*use_login_shell*/ true);
     let selected_cwd = turn_context.config.cwd.join("selected-environment");
     let expected_cwd = selected_cwd.join("subdir");
+    let active_permission_profile = ActivePermissionProfile::new("selected-profile");
     let selected_environment = TurnEnvironment::new(
-        "selected-environment".to_string(),
+        TurnEnvironmentSelection {
+            environment_id: "selected-environment".to_string(),
+            cwd: PathUri::from_abs_path(&selected_cwd),
+            workspace_roots: Vec::new(),
+            config: EnvironmentConfigState::FromThread,
+        },
         Arc::clone(
             &turn_context
                 .environments
@@ -109,19 +118,22 @@ async fn shell_command_handler_to_exec_params_uses_selected_environment() {
                 .expect("primary environment")
                 .environment,
         ),
-        PathUri::from_abs_path(&selected_cwd),
-        Vec::new(),
         Some(selected_shell),
-        EnvironmentConfig {
+        TurnEnvironmentConfig {
             allow_login_shell: true,
+            permission_profile: PermissionProfileSnapshot::active(
+                permission_profile,
+                active_permission_profile.clone(),
+            ),
+            selected_capability_roots: None,
         },
     );
     let mut expected_env = create_env(
         &turn_context.config.permissions.shell_environment_policy,
         Some(session.thread_id),
     );
-    let active_permission_profile = turn_context.config.permissions.active_permission_profile();
-    inject_permission_profile_env(&mut expected_env, active_permission_profile.as_ref());
+    inject_session_id_env(&mut expected_env, session.session_id());
+    inject_permission_profile_env(&mut expected_env, Some(&active_permission_profile));
 
     let params = ShellCommandToolCallParams {
         command,
@@ -149,9 +161,7 @@ async fn shell_command_handler_to_exec_params_uses_selected_environment() {
     assert_eq!(exec_params.env, expected_env);
     assert_eq!(
         exec_params.env.get(CODEX_PERMISSION_PROFILE_ENV_VAR),
-        active_permission_profile
-            .as_ref()
-            .map(|profile| &profile.id)
+        Some(&active_permission_profile.id)
     );
     assert_eq!(exec_params.network, turn_context.network);
     assert_eq!(

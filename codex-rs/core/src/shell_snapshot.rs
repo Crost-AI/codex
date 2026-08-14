@@ -7,7 +7,6 @@ use std::time::SystemTime;
 
 use crate::StateDbHandle;
 use crate::rollout::list::find_thread_path_by_id_str;
-use crate::session::turn_context::TurnEnvironment;
 use crate::shell::Shell;
 use crate::shell::ShellType;
 use crate::shell::get_shell;
@@ -15,9 +14,11 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
+use codex_exec_server::Environment;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use tokio::fs;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -68,17 +69,19 @@ impl ShellSnapshot {
 
     pub(crate) async fn build(
         self,
-        environment: TurnEnvironment,
+        environment: Arc<Environment>,
+        cwd: PathUri,
+        shell: Option<Shell>,
     ) -> Option<Arc<ShellSnapshotFile>> {
         let config = self.config.as_ref()?;
-        if environment.environment.is_remote() {
+        if environment.is_remote() {
             return None;
         }
 
-        let shell = environment.shell.clone()?;
+        let shell = shell?;
         // TODO(anp): Migrate shell snapshot creation to accept PathUri and defer native
         // conversion to the spawned shell process.
-        let cwd = environment.cwd().to_abs_path().ok()?;
+        let cwd = cwd.to_abs_path().ok()?;
         Self::build_for_cwd(Arc::clone(config), cwd, shell).await
     }
 
@@ -286,6 +289,7 @@ async fn run_script_with_timeout(
     // Handler is kept as guard to control the drop. The `mut` pattern is required because .args()
     // returns a ref of handler.
     let mut handler = Command::new(&args[0]);
+    codex_protocol::shell_environment::scrub_non_inheritable_env_vars(handler.as_std_mut());
     handler.args(&args[1..]);
     handler.stdin(Stdio::null());
     handler.current_dir(cwd);

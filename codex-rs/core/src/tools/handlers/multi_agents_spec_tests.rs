@@ -14,6 +14,7 @@ fn model_preset(id: &str, show_in_picker: bool) -> ModelPreset {
         model: format!("{id}-model"),
         display_name: format!("{id} display"),
         description: format!("{id} description"),
+        model_specialty: None,
         default_reasoning_effort: ReasoningEffort::Medium,
         supported_reasoning_efforts: vec![ReasoningEffortPreset {
             effort: ReasoningEffort::Medium,
@@ -420,14 +421,14 @@ fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
         properties
             .get("timeout_ms")
             .and_then(|schema| schema.description.as_deref()),
-        Some(
-            "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000. Prefer longer waits (minutes) to avoid busy polling."
-        )
+        Some("Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000.")
     );
     assert_eq!(parameters.required.as_ref(), None);
     assert_eq!(
         output_schema.expect("wait output schema")["properties"]["message"]["description"],
-        json!("Brief wait summary without the agent's final content.")
+        json!(
+            "Brief wait summary without the agent's final content, including any timeout adjustment."
+        )
     );
 }
 

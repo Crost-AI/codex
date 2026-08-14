@@ -7,8 +7,9 @@ use crate::legacy_core::config::Config;
 use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
 use crate::legacy_core::config::ConfigTomlLoadResult;
+use crate::legacy_core::config::bootstrap_auth_config;
 use crate::legacy_core::config::load_config_toml_with_layer_stack;
-use crate::legacy_core::config::resolve_bootstrap_auth_keyring_backend_kind;
+#[cfg(test)]
 use crate::legacy_core::config::resolve_bootstrap_http_client_factory;
 use crate::legacy_core::config::resolve_oss_provider;
 use crate::legacy_core::config::resolve_profile_v2_config_path;
@@ -47,10 +48,10 @@ use codex_config::types::ResumeCwdMode;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerRuntimePaths;
 use codex_login::AuthConfig;
-use codex_login::AuthRouteConfig;
 use codex_login::default_client::originator;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::enforce_login_restrictions;
+use codex_login::is_workload_identity_selected;
 use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::config_types::AltScreenMode;
@@ -75,6 +76,7 @@ use std::fs::OpenOptions;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 pub use token_usage::TokenUsage;
 use tracing::error;
@@ -148,6 +150,7 @@ mod model_catalog;
 mod model_migration;
 mod motion;
 mod multi_agents;
+mod named_session_lookup;
 mod notifications;
 #[cfg(any(not(debug_assertions), test))]
 mod npm_registry;
@@ -226,6 +229,7 @@ pub use public_widgets::composer_input::ComposerInput;
 // (tests access modules directly within the crate)
 
 const TUI_LOG_FILE_NAME: &str = "codex-tui.log";
+const INTERACTIVE_OTEL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(/*millis*/ 500);
 
 #[cfg(unix)]
 const AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT: std::time::Duration =
@@ -270,6 +274,17 @@ pub(crate) enum AppServerTarget {
 impl AppServerTarget {
     pub(crate) fn uses_remote_workspace(&self) -> bool {
         matches!(self, Self::Remote { .. })
+    }
+
+    fn auth_config_for_cloud_loader(&self, mut auth_config: AuthConfig) -> AuthConfig {
+        if self.uses_remote_workspace() {
+            // Remove local auth restrictions before loading credentials for a remote
+            // workspace; the remote app server enforces its own authentication policy.
+            auth_config.forced_login_method = None;
+            auth_config.forced_chatgpt_workspace_id = None;
+            auth_config.managed_auth_policy = Default::default();
+        }
+        auth_config
     }
 
     fn thread_params_mode(&self) -> ThreadParamsMode {
@@ -609,45 +624,9 @@ pub(crate) fn resume_source_kinds(include_non_interactive: bool) -> Vec<ThreadSo
     source_kinds
 }
 
-async fn lookup_session_target_by_name_with_app_server(
-    app_server: &mut AppServerSession,
-    name: &str,
-) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
-    let mut cursor = None;
-    loop {
-        let response = app_server
-            .thread_list(ThreadListParams {
-                cursor: cursor.clone(),
-                limit: Some(100),
-                sort_key: Some(AppServerThreadSortKey::UpdatedAt),
-                sort_direction: None,
-                model_providers: None,
-                source_kinds: Some(vec![ThreadSourceKind::Cli, ThreadSourceKind::VsCode]),
-                archived: Some(false),
-                section_id: None,
-                parent_thread_id: None,
-                ancestor_thread_id: None,
-                cwd: None,
-                use_state_db_only: false,
-                search_term: Some(name.to_string()),
-            })
-            .await?;
-        if let Some(thread) = response
-            .data
-            .into_iter()
-            .find(|thread| thread.name.as_deref() == Some(name))
-        {
-            return Ok(session_target_from_app_server_thread(thread));
-        }
-        if response.next_cursor.is_none() {
-            return Ok(None);
-        }
-        cursor = response.next_cursor;
-    }
-}
-
 async fn lookup_session_target_with_app_server(
     app_server: &mut AppServerSession,
+    config: &Config,
     id_or_name: &str,
 ) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
     if Uuid::parse_str(id_or_name).is_ok() {
@@ -678,7 +657,7 @@ async fn lookup_session_target_with_app_server(
         };
     }
 
-    lookup_session_target_by_name_with_app_server(app_server, id_or_name).await
+    named_session_lookup::lookup(app_server, config, id_or_name).await
 }
 
 async fn lookup_latest_session_target_with_app_server(
@@ -856,8 +835,18 @@ fn app_server_target_for_launch(
     explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
     default_daemon_socket: Option<AbsolutePathBuf>,
     can_reuse_implicit_local_daemon: bool,
-) -> AppServerTarget {
-    match explicit_remote_endpoint {
+    workload_identity_selected: bool,
+) -> std::io::Result<AppServerTarget> {
+    if workload_identity_selected {
+        if explicit_remote_endpoint.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "workload identity must be configured on the remote app-server host",
+            ));
+        }
+        return Ok(AppServerTarget::Embedded);
+    }
+    Ok(match explicit_remote_endpoint {
         Some(endpoint) => AppServerTarget::Remote { endpoint },
         None if can_reuse_implicit_local_daemon => {
             default_daemon_socket.map_or(AppServerTarget::Embedded, |socket_path| {
@@ -867,7 +856,20 @@ fn app_server_target_for_launch(
             })
         }
         None => AppServerTarget::Embedded,
-    }
+    })
+}
+
+async fn cloud_config_bundle_for_app_server_target(
+    app_server_target: &AppServerTarget,
+    bootstrap_config: &ConfigTomlLoadResult,
+    codex_home: &Path,
+) -> std::io::Result<CloudConfigBundleLoader> {
+    cloud_config_bundle_loader_for_storage(
+        app_server_target
+            .auth_config_for_cloud_loader(bootstrap_auth_config(codex_home, bootstrap_config)?),
+        /*enable_codex_api_key_env*/ false,
+    )
+    .await
 }
 
 fn loader_overrides_are_default(loader_overrides: &LoaderOverrides) -> bool {
@@ -961,12 +963,14 @@ pub async fn run_main(
         launch_loader_overrides.user_config_path = Some(user_config_path);
         launch_loader_overrides.user_config_profile = Some(profile_v2.clone());
     }
-    let reuse_implicit_local_daemon = can_reuse_implicit_local_daemon(
-        &cli_kv_overrides,
-        &launch_loader_overrides,
-        strict_config,
-        cli.bypass_hook_trust,
-    );
+    let workload_identity_selected = is_workload_identity_selected();
+    let reuse_implicit_local_daemon = !workload_identity_selected
+        && can_reuse_implicit_local_daemon(
+            &cli_kv_overrides,
+            &launch_loader_overrides,
+            strict_config,
+            cli.bypass_hook_trust,
+        );
     let default_daemon = if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
         maybe_probe_default_daemon_socket(&codex_home).await
     } else {
@@ -976,7 +980,8 @@ pub async fn run_main(
         explicit_remote_endpoint,
         default_daemon,
         reuse_implicit_local_daemon,
-    );
+        workload_identity_selected,
+    )?;
     let remote_cwd_override = cli
         .cwd
         .clone()
@@ -1005,6 +1010,7 @@ pub async fn run_main(
         loader_overrides.user_config_path = Some(user_config_path);
         loader_overrides.user_config_profile = Some(profile_v2.clone());
     }
+    loader_overrides.ignore_login_requirements = app_server_target.uses_remote_workspace();
 
     let bootstrap_config = load_bootstrap_config_or_exit(
         &codex_home,
@@ -1016,32 +1022,12 @@ pub async fn run_main(
     )
     .await;
     let bootstrap_config_toml = &bootstrap_config.config_toml;
-
-    let chatgpt_base_url = bootstrap_config_toml
-        .chatgpt_base_url
-        .clone()
-        .unwrap_or_else(|| "https://chatgpt.com/backend-api/".to_string());
-    let bootstrap_http_client_factory = resolve_bootstrap_http_client_factory(
-        bootstrap_config_toml,
-        bootstrap_config
-            .config_layer_stack
-            .requirements()
-            .feature_requirements
-            .as_ref(),
-    )?;
-    let auth_route_config =
-        AuthRouteConfig::from_http_client_factory(bootstrap_http_client_factory);
-    let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
-        codex_home.to_path_buf(),
-        /*enable_codex_api_key_env*/ false,
-        bootstrap_config_toml
-            .cli_auth_credentials_store
-            .unwrap_or_default(),
-        resolve_bootstrap_auth_keyring_backend_kind(&bootstrap_config)?,
-        chatgpt_base_url,
-        auth_route_config,
+    let cloud_config_bundle = cloud_config_bundle_for_app_server_target(
+        &app_server_target,
+        &bootstrap_config,
+        &codex_home,
     )
-    .await;
+    .await?;
 
     let cwd_override = if app_server_target.uses_remote_workspace() {
         None
@@ -1131,15 +1117,15 @@ pub async fn run_main(
     )
     .await;
 
-    let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
-        config.codex_home.to_path_buf(),
-        /*enable_codex_api_key_env*/ false,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-        config.chatgpt_base_url.clone(),
-        config.auth_route_config(),
-    )
-    .await;
+    let cloud_config_bundle = if workload_identity_selected {
+        cloud_config_bundle
+    } else {
+        cloud_config_bundle_loader_for_storage(
+            app_server_target.auth_config_for_cloud_loader(config.auth_config()),
+            /*enable_codex_api_key_env*/ false,
+        )
+        .await?
+    };
     let environment_manager = Arc::new(
         prepared_environment_manager
             .build(Some(local_runtime_paths), config.http_client_factory())
@@ -1205,20 +1191,9 @@ pub async fn run_main(
         }
     }
 
-    if !app_server_target.uses_remote_workspace() {
-        let auth_route_config = config.auth_route_config();
+    if !app_server_target.uses_remote_workspace() && !workload_identity_selected {
         #[allow(clippy::print_stderr)]
-        if let Err(err) = enforce_login_restrictions(&AuthConfig {
-            codex_home: config.codex_home.to_path_buf(),
-            auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
-            keyring_backend_kind: config.auth_keyring_backend_kind(),
-            forced_login_method: config.forced_login_method,
-            forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
-            chatgpt_base_url: Some(config.chatgpt_base_url.clone()),
-            auth_route_config,
-        })
-        .await
-        {
+        if let Err(err) = enforce_login_restrictions(&config.auth_config()).await {
             eprintln!("{err}");
             std::process::exit(1);
         }
@@ -1295,7 +1270,7 @@ pub async fn run_main(
         .with(otel_tracing_layer)
         .try_init();
 
-    run_ratatui_app(
+    let app_result = run_ratatui_app(
         cli,
         arg0_paths,
         loader_overrides,
@@ -1313,7 +1288,17 @@ pub async fn run_main(
         environment_manager,
     )
     .await
-    .map_err(|err| std::io::Error::other(err.to_string()))
+    .map_err(|err| std::io::Error::other(err.to_string()));
+
+    if let Some(otel) = otel
+        && let Err(err) = otel
+            .shutdown_with_timeout(INTERACTIVE_OTEL_SHUTDOWN_TIMEOUT)
+            .await
+    {
+        warn!(error = %err, "failed to finish interactive telemetry shutdown");
+    }
+
+    app_result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1335,6 +1320,7 @@ async fn run_ratatui_app(
     environment_manager: Arc<EnvironmentManager>,
 ) -> color_eyre::Result<AppExitInfo> {
     let uses_remote_workspace = app_server_target.uses_remote_workspace();
+    let workload_identity_selected = is_workload_identity_selected();
     color_eyre::install()?;
 
     tooltips::announcement::prewarm(initial_config.http_client_factory());
@@ -1425,7 +1411,9 @@ async fn run_ratatui_app(
         !uses_remote_workspace && should_show_trust_screen(&initial_config);
     #[cfg(target_os = "windows")]
     let mut trust_decision_was_made = false;
-    let login_status = if initial_config.model_provider.requires_openai_auth {
+    let login_status = if workload_identity_selected {
+        LoginStatus::AuthMode(AuthMode::Chatgpt)
+    } else if initial_config.model_provider.requires_openai_auth {
         let Some(app_server) = app_server.as_mut() else {
             unreachable!("app server should exist when auth is required");
         };
@@ -1476,16 +1464,12 @@ async fn run_ratatui_app(
         // If this onboarding run included the login step, always refresh the cloud config bundle
         // and rebuild config. This avoids missing newly available cloud-managed policy due to login
         // status detection edge cases.
-        if show_login_screen && !uses_remote_workspace {
+        if show_login_screen && !uses_remote_workspace && !workload_identity_selected {
             cloud_config_bundle = cloud_config_bundle_loader_for_storage(
-                initial_config.codex_home.to_path_buf(),
+                initial_config.auth_config(),
                 /*enable_codex_api_key_env*/ false,
-                initial_config.cli_auth_credentials_store_mode,
-                initial_config.auth_keyring_backend_kind(),
-                initial_config.chatgpt_base_url.clone(),
-                initial_config.auth_route_config(),
             )
-            .await;
+            .await?;
         }
 
         // If the user made an explicit trust decision, or we showed the login flow, reload config
@@ -1530,7 +1514,8 @@ async fn run_ratatui_app(
             let Some(startup_app_server) = app_server.as_mut() else {
                 unreachable!("app server should be initialized for --fork <id>");
             };
-            match lookup_session_target_with_app_server(startup_app_server, id_str).await? {
+            match lookup_session_target_with_app_server(startup_app_server, &config, id_str).await?
+            {
                 Some(target_session) => resume_picker::SessionSelection::Fork(target_session),
                 None => {
                     shutdown_app_server_if_present(app_server.take()).await;
@@ -1587,7 +1572,7 @@ async fn run_ratatui_app(
         let Some(startup_app_server) = app_server.as_mut() else {
             unreachable!("app server should be initialized for --resume <id>");
         };
-        match lookup_session_target_with_app_server(startup_app_server, id_str).await? {
+        match lookup_session_target_with_app_server(startup_app_server, &config, id_str).await? {
             Some(target_session) => resume_picker::SessionSelection::Resume(target_session),
             None => {
                 shutdown_app_server_if_present(app_server.take()).await;
@@ -2569,7 +2554,8 @@ mod tests {
             /*explicit_remote_endpoint*/ None,
             Some(socket_path.clone()),
             /*can_reuse_implicit_local_daemon*/ true,
-        );
+            /*workload_identity_selected*/ false,
+        )?;
 
         assert_eq!(
             target,
@@ -2591,7 +2577,8 @@ mod tests {
             Some(explicit_endpoint.clone()),
             Some(AbsolutePathBuf::relative_to_current_dir("default.sock")?),
             /*can_reuse_implicit_local_daemon*/ false,
-        );
+            /*workload_identity_selected*/ false,
+        )?;
 
         assert_eq!(
             target,
@@ -2612,9 +2599,40 @@ mod tests {
             /*explicit_remote_endpoint*/ None,
             Some(socket_path),
             /*can_reuse_implicit_local_daemon*/ false,
-        );
+            /*workload_identity_selected*/ false,
+        )?;
 
         assert_eq!(target, AppServerTarget::Embedded);
+        Ok(())
+    }
+
+    #[test]
+    fn workload_identity_requires_an_embedded_app_server() -> color_eyre::Result<()> {
+        let default_socket = AbsolutePathBuf::relative_to_current_dir("default.sock")?;
+        assert_eq!(
+            app_server_target_for_launch(
+                /*explicit_remote_endpoint*/ None,
+                Some(default_socket),
+                /*can_reuse_implicit_local_daemon*/ true,
+                /*workload_identity_selected*/ true,
+            )?,
+            AppServerTarget::Embedded
+        );
+
+        let explicit_endpoint = RemoteAppServerEndpoint::UnixSocket {
+            socket_path: AbsolutePathBuf::relative_to_current_dir("explicit.sock")?,
+        };
+        let error = app_server_target_for_launch(
+            Some(explicit_endpoint),
+            /*default_daemon_socket*/ None,
+            /*can_reuse_implicit_local_daemon*/ false,
+            /*workload_identity_selected*/ true,
+        )
+        .expect_err("remote hosts must own workload identity");
+        assert_eq!(
+            error.to_string(),
+            "workload identity must be configured on the remote app-server host"
+        );
         Ok(())
     }
 
@@ -3115,68 +3133,120 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lookup_session_target_by_name_uses_backend_title_search() -> color_eyre::Result<()> {
-        Box::pin(async {
-            let temp_dir = TempDir::new()?;
-            let config = build_config(&temp_dir).await?;
-            let thread_id = ThreadId::new();
-            let rollout_path = temp_dir
-                .path()
-                .join("sessions/2025/02/01")
-                .join(format!("rollout-2025-02-01T10-00-00-{thread_id}.jsonl"));
-            let rollout_dir = rollout_path.parent().expect("rollout parent");
-            std::fs::create_dir_all(rollout_dir)?;
-            std::fs::write(&rollout_path, "")?;
-
-            let state_runtime = codex_state::StateRuntime::init(
-                codex_state::SqliteConfig::new_for_testing(config.codex_home.as_path().abs()),
-                config.model_provider_id.clone(),
+    async fn resume_picker_loads_complete_paginated_and_legacy_transcripts()
+    -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut config = build_config(&temp_dir).await?;
+        config.terminal_resize_reflow.max_rows =
+            crate::legacy_core::config::TerminalResizeReflowMaxRows::Limit(2);
+        let mut app_server = AppServerSession::new(
+            AppServerClient::InProcess(start_test_embedded_app_server(config.clone()).await?),
+            ThreadParamsMode::Embedded,
+        );
+        let filename_ts = "2025-01-05T12-00-00";
+        let rollout_line = |ordinal: usize, payload: serde_json::Value| {
+            serde_json::json!({
+                "timestamp": "2025-01-05T12:00:00Z",
+                "type": "event_msg",
+                "payload": payload,
+                "ordinal": ordinal,
+            })
+        };
+        for (history_mode, create_rollout) in [
+            app_test_support::create_fake_rollout,
+            app_test_support::create_fake_paginated_rollout,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let thread_id = create_rollout(
+                temp_dir.path(),
+                filename_ts,
+                "2025-01-05T12:00:00Z",
+                "message 0",
+                Some(config.model_provider_id.as_str()),
+                /*git_info*/ None,
             )
-            .await
-            .map_err(std::io::Error::other)?;
-            state_runtime
-                .mark_backfill_complete(/*last_watermark*/ None)
-                .await
-                .map_err(std::io::Error::other)?;
-
-            let session_cwd = temp_dir.path().join("project");
-            std::fs::create_dir_all(&session_cwd)?;
-            let created_at = chrono::DateTime::parse_from_rfc3339("2025-02-01T10:00:00Z")
-                .expect("timestamp should parse")
-                .with_timezone(&chrono::Utc);
-            let mut builder = codex_state::ThreadMetadataBuilder::new(
+            .expect("create session rollout");
+            let path = app_test_support::rollout_path(temp_dir.path(), filename_ts, &thread_id);
+            let mut contents = std::fs::read_to_string(&path)?;
+            let started = rollout_line(
+                /*ordinal*/ 3,
+                serde_json::json!({ "type": "task_started", "turn_id": "history-turn", "model_context_window": null }),
+            );
+            contents.push_str(&format!("{started}\n"));
+            for index in 0..=100 {
+                let message = format!("message {index}");
+                let payload = if history_mode == 1 {
+                    serde_json::json!({
+                        "type": "item_completed",
+                        "thread_id": thread_id,
+                        "turn_id": "history-turn",
+                        "item": { "type": "UserMessage", "id": format!("user-{index}"),
+                            "content": [{ "type": "text", "text": message }] },
+                    })
+                } else {
+                    serde_json::json!({ "type": "user_message", "message": message })
+                };
+                let item = rollout_line(index + 4, payload);
+                contents.push_str(&format!("{item}\n"));
+            }
+            if history_mode == 1 {
+                for index in 0..125 {
+                    let item = rollout_line(
+                        index + 105,
+                        serde_json::json!({
+                            "type": "item_completed",
+                            "thread_id": thread_id,
+                            "turn_id": "history-turn",
+                            "item": { "type": "Reasoning", "id": format!("hidden-{index}"),
+                                "summary_text": [], "raw_content": [] },
+                        }),
+                    );
+                    contents.push_str(&format!("{item}\n"));
+                }
+            }
+            std::fs::write(path, contents)?;
+            let thread_id = ThreadId::from_string(&thread_id)?;
+            let started = app_server
+                .resume_thread(
+                    config.clone(),
+                    thread_id,
+                    app_server_session::ResumeModelSettings::RestoreFromThread,
+                )
+                .await?;
+            if history_mode == 1 {
+                assert!(
+                    started
+                        .turns
+                        .iter()
+                        .flat_map(|turn| &turn.items)
+                        .any(|item| {
+                            matches!(
+                                item,
+                                codex_app_server_protocol::ThreadItem::UserMessage { .. }
+                            )
+                        })
+                );
+                let preview = crate::resume_picker::load_transcript_preview(
+                    &mut app_server,
+                    thread_id,
+                    /*config*/ None,
+                )
+                .await?;
+                assert!(!preview.is_empty());
+            }
+            let cells = crate::thread_transcript::load_session_transcript(
+                &mut app_server,
                 thread_id,
-                rollout_path.clone(),
-                created_at,
-                serde_json::from_value(serde_json::json!("cli"))
-                    .expect("cli session source should deserialize"),
-            );
-            builder.cwd = session_cwd;
-            let mut metadata = builder.build(config.model_provider_id.as_str());
-            metadata.title = "saved-session".to_string();
-            metadata.first_user_message = Some("preview text".to_string());
-            state_runtime
-                .upsert_thread(&metadata)
-                .await
-                .map_err(std::io::Error::other)?;
-
-            let mut app_server = AppServerSession::new(
-                codex_app_server_client::AppServerClient::InProcess(
-                    start_test_embedded_app_server(config).await?,
-                ),
-                ThreadParamsMode::Embedded,
-            );
-            let target =
-                lookup_session_target_by_name_with_app_server(&mut app_server, "saved-session")
-                    .await?;
-            let target = target.expect("name lookup should find the saved thread");
-            assert_eq!(target.path, Some(rollout_path));
-            assert_eq!(target.thread_id, thread_id);
-
-            app_server.shutdown().await?;
-            Ok(())
-        })
-        .await
+                crate::thread_transcript::RawReasoningVisibility::Hidden,
+                /*config*/ None,
+            )
+            .await?;
+            assert!(cells.len() > 100);
+        }
+        app_server.shutdown().await?;
+        Ok(())
     }
 
     #[tokio::test]

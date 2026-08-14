@@ -155,6 +155,7 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
         model_messages: Some(local_model_messages_for_slug(slug)),
         include_skills_usage_instructions: false,
         include_plugin_usage_instructions: false,
+        include_apps_usage_instructions: false,
         supports_reasoning_summary_parameter: true,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
@@ -162,7 +163,6 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
         apply_patch_tool_type: None,
         web_search_tool_type: WebSearchToolType::Text,
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
-        supports_parallel_tool_calls: false,
         supports_image_detail_original: false,
         context_window: Some(272_000),
         max_context_window: Some(272_000),
@@ -174,7 +174,10 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
         used_fallback_model_metadata: true, // this is the fallback model metadata
         supports_search_tool: false,
         use_responses_lite: false,
+        node_repl_auto_review_required: false,
+        node_repl_disabled: false,
         auto_review_model_override: None,
+        model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
     }

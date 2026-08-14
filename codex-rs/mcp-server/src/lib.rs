@@ -64,6 +64,7 @@ pub async fn run_main(
     cli_config_overrides: CliConfigOverrides,
     strict_config: bool,
 ) -> IoResult<()> {
+    reject_workload_identity(codex_login::is_workload_identity_selected())?;
     // Parse CLI overrides once and derive the base Config eagerly so later
     // components do not need to work with raw TOML values.
     let cli_kv_overrides = cli_config_overrides.parse_overrides().map_err(|e| {
@@ -80,6 +81,7 @@ pub async fn run_main(
         .map_err(|e| {
             std::io::Error::new(ErrorKind::InvalidData, format!("error loading config: {e}"))
         })?;
+    config.auth_config().validate()?;
     set_default_client_residency_requirement(config.enforce_residency.value());
     let otel = codex_core::otel_init::build_provider(
         &config,
@@ -160,7 +162,7 @@ pub async fn run_main(
             state_db,
             installation_id,
         )
-        .await;
+        .await?;
         async move {
             while let Some(msg) = incoming_rx.recv().await {
                 match msg {
@@ -205,6 +207,20 @@ pub async fn run_main(
 
     Ok(())
 }
+
+fn reject_workload_identity(workload_identity_selected: bool) -> IoResult<()> {
+    if workload_identity_selected {
+        return Err(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "workload identity is not supported by `codex mcp-server`",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "workload_identity_tests.rs"]
+mod workload_identity_tests;
 
 #[cfg(test)]
 mod tests {
