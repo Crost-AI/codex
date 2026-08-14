@@ -1,0 +1,7 @@
+load("//:defs.bzl", "codex_rust_crate")
+
+codex_rust_crate(
+    name = "channels",
+    crate_name = "codex_channels",
+    test_data_extra = ["examples/discord/discord-channel.mjs"],
+)

@@ -1616,6 +1616,19 @@ fn config_request_overrides_from_config(
     if config.bypass_hook_trust {
         overrides.insert("bypass_hook_trust".to_string(), true.into());
     }
+    if !config.channels_entries.is_empty() {
+        overrides.insert(
+            "channels.entries".to_string(),
+            serde_json::Value::Array(
+                config
+                    .channels_entries
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
     Some(overrides)
 }
 

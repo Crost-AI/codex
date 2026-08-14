@@ -119,6 +119,7 @@ pub(crate) async fn initialize_client(client: &RmcpClient) -> anyhow::Result<()>
                 }
                 .boxed()
             }),
+            /*custom_notification_handler*/ None,
         )
         .await?;
     Ok(())
@@ -157,6 +158,7 @@ pub(crate) async fn create_remote_client(
                 }
                 .boxed()
             }),
+            /*custom_notification_handler*/ None,
         )
         .await?;
 

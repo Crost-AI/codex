@@ -20,7 +20,25 @@ pub fn resume_command(thread_name: Option<&str>, thread_id: Option<ThreadId>) ->
 }
 
 pub fn resume_hint(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Option<String> {
+    resume_hint_with_channels(thread_name, thread_id, /*channels*/ &[])
+}
+
+/// Resume hint that carries the session's `--channels` opt-ins.
+///
+/// Channels are a per-launch opt-in, so a bare `codex resume` comes back
+/// without them. When the session has any, the hint uses the explicit
+/// command form (rather than the "then select" prose) so the whole line is
+/// copy-pasteable with the flag attached.
+pub fn resume_hint_with_channels(
+    thread_name: Option<&str>,
+    thread_id: Option<ThreadId>,
+    channels: &[String],
+) -> Option<String> {
     let thread_id = thread_id?;
+    if !channels.is_empty() {
+        let command = resume_command(thread_name, Some(thread_id))?;
+        return Some(format!("{command} --channels {}", channels.join(",")));
+    }
     match thread_name.filter(|name| !name.is_empty()) {
         Some(thread_name) => Some(format!(
             "codex resume, then select {thread_name} ({thread_id})"
@@ -33,6 +51,20 @@ pub fn resume_hint(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Op
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn channels_opt_in_uses_the_command_form_with_the_flag() {
+        let thread_id = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let hint = resume_hint_with_channels(
+            Some("my-thread"),
+            Some(thread_id),
+            &["server:discord".to_string(), "server:webhook".to_string()],
+        );
+        assert_eq!(
+            hint,
+            Some("codex resume my-thread --channels server:discord,server:webhook".to_string())
+        );
+    }
 
     #[test]
     fn prefers_name_over_id() {

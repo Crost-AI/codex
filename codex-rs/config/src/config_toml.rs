@@ -132,6 +132,23 @@ of strings; comma-separated strings are not supported. Use \
     }
 }
 
+/// `[channels]` settings controlling which MCP servers may push events into
+/// a running session.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ChannelsToml {
+    /// Master switch for the channels feature. Defaults to true. The
+    /// CODEX_CHANNELS_ENABLED environment variable overrides this value but is
+    /// itself overridden by managed config.
+    pub enabled: Option<bool>,
+    /// Optional allowlist of channel entry strings (e.g. `server:discord`).
+    /// Unset allows any requested entry; an empty list allows none.
+    pub allowed: Option<Vec<String>>,
+    /// Channel entries to activate for sessions, equivalent to passing
+    /// `--channels` on the command line.
+    pub entries: Option<Vec<String>>,
+}
+
 /// Orchestrator-owned feature settings.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -255,6 +272,10 @@ pub struct ConfigToml {
     /// auto: Use the keyring if available, otherwise use a file.
     #[serde(default)]
     pub cli_auth_credentials_store: Option<AuthCredentialsStoreMode>,
+
+    /// Channel settings: which MCP servers may push events into a session.
+    #[serde(default)]
+    pub channels: Option<ChannelsToml>,
 
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     #[serde(default)]

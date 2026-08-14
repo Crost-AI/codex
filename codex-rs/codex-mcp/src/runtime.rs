@@ -78,6 +78,9 @@ pub struct McpRuntimeInput {
     pub codex_apps_auth_manager: Option<Arc<AuthManager>>,
     pub elicitation_reviewer: Option<ElicitationReviewerHandle>,
     pub elicitation_lifecycle: Option<ElicitationLifecycle>,
+    /// Per-server channel notification wiring for servers this session
+    /// opted in as channels; `None` when no channel is active.
+    pub channel_wiring: Option<Arc<crate::channels::ChannelWiring>>,
 }
 
 /// Owns all mutable MCP state for one Codex thread.
@@ -407,6 +410,25 @@ impl McpRuntime {
         self.latest_connections()
             .call_tool(server, tool, arguments, meta)
             .await
+    }
+
+    /// The `commands` reply-routing descriptor a server declared in its
+    /// `codex/channel` capability value, when it opted into host-executed
+    /// slash commands. `None` for unknown servers, failed startups, and
+    /// servers without the descriptor.
+    pub async fn latest_channel_commands_descriptor(
+        &self,
+        server: &str,
+    ) -> Option<codex_channels::ChannelCommandsDescriptor> {
+        self.latest_connections()
+            .channel_commands_descriptor(server)
+            .await
+    }
+
+    /// Per-server `codex/channel` capability declaration for the live
+    /// connection set (used by the `/channels` status view).
+    pub async fn latest_list_channel_capabilities(&self) -> std::collections::HashMap<String, bool> {
+        self.latest_connections().list_channel_capabilities().await
     }
 
     pub async fn latest_read_resource(

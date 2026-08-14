@@ -362,6 +362,31 @@
       },
       "type": "object"
     },
+    "ChannelsToml": {
+      "additionalProperties": false,
+      "description": "`[channels]` settings controlling which MCP servers may push events into a running session.",
+      "properties": {
+        "allowed": {
+          "description": "Optional allowlist of channel entry strings (e.g. `server:discord`). Unset allows any requested entry; an empty list allows none.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "description": "Master switch for the channels feature. Defaults to true. The CODEX_CHANNELS_ENABLED environment variable overrides this value but is itself overridden by managed config.",
+          "type": "boolean"
+        },
+        "entries": {
+          "description": "Channel entries to activate for sessions, equivalent to passing `--channels` on the command line.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "CodeModeConfigToml": {
       "additionalProperties": false,
       "properties": {
@@ -5000,6 +5025,15 @@
       "format": "uint64",
       "minimum": 0.0,
       "type": "integer"
+    },
+    "channels": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ChannelsToml"
+        }
+      ],
+      "default": null,
+      "description": "Channel settings: which MCP servers may push events into a session."
     },
     "chatgpt_base_url": {
       "description": "Base URL for requests to ChatGPT (as opposed to the OpenAI API).",

@@ -110,6 +110,7 @@ const RAW_TOOL_OUTPUT_WIDTH: usize = 10_000;
 
 mod approvals;
 mod base;
+mod channels;
 mod exec;
 mod hook_cell;
 mod markdown_render_cache;
@@ -129,6 +130,7 @@ pub(crate) use exec::*;
 pub(crate) use hook_cell::HookCell;
 pub(crate) use hook_cell::new_active_hook_cell;
 pub(crate) use hook_cell::new_completed_hook_cell;
+pub(crate) use channels::new_channels_output;
 pub(crate) use mcp::*;
 pub(crate) use messages::*;
 pub(crate) use notices::*;

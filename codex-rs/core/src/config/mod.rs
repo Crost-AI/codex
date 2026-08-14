@@ -717,6 +717,14 @@ pub struct Config {
     /// Whether orchestrator-owned MCP tools are exposed to the model.
     pub orchestrator_mcp_enabled: bool,
 
+    /// Channel entries this session opted into (from `--channels` and
+    /// `[channels] entries`).
+    pub channels_entries: Vec<String>,
+
+    /// Effective `[channels]` policy (master switch and allowlist) after
+    /// managed config and `CODEX_CHANNELS_ENABLED` are applied.
+    pub channels_policy: codex_channels::ChannelsPolicy,
+
     /// Whether to inject the `<environment_context>` user block.
     pub include_environment_context: bool,
 
@@ -2580,6 +2588,9 @@ pub struct ConfigOverrides {
     /// Explicit absolute runtime workspace roots for this session. When set,
     /// this is the full runtime root list rather than an additive override.
     pub workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    /// Channel entries (`--channels`) opted into for this session, additive to
+    /// `[channels] entries` from config.
+    pub channels: Vec<String>,
 }
 
 fn dedupe_absolute_paths(paths: &mut Vec<AbsolutePathBuf>) {
@@ -2644,6 +2655,23 @@ fn resolve_orchestrator_feature_enabled(
     feature: Option<&codex_config::config_toml::OrchestratorFeatureToml>,
 ) -> bool {
     feature.and_then(|feature| feature.enabled).unwrap_or(true)
+}
+
+/// Reads `[channels] enabled` from managed config layers only. Managed config
+/// outranks both `CODEX_CHANNELS_ENABLED` and user config for this setting.
+fn managed_channels_enabled(config_layer_stack: &ConfigLayerStack) -> Option<bool> {
+    config_layer_stack
+        .layers_high_to_low()
+        .into_iter()
+        .filter(|layer| {
+            !layer.is_disabled()
+                && matches!(
+                    layer.name,
+                    ConfigLayerSource::LegacyManagedConfigTomlFromFile { .. }
+                        | ConfigLayerSource::LegacyManagedConfigTomlFromMdm
+                )
+        })
+        .find_map(|layer| layer.config.get("channels")?.get("enabled")?.as_bool())
 }
 
 fn resolve_code_mode_config(config_toml: &ConfigToml) -> CodeModeConfig {
@@ -3207,6 +3235,19 @@ impl Config {
             config_layer_stack.requirements(),
             &mut startup_warnings,
         );
+
+        let channels_toml = cfg.channels.as_ref();
+        let channels_policy = codex_channels::ChannelsPolicy {
+            enabled: codex_channels::resolve_channels_enabled(
+                managed_channels_enabled(&config_layer_stack),
+                std::env::var(codex_channels::CHANNELS_ENABLED_ENV_VAR)
+                    .ok()
+                    .as_deref(),
+                channels_toml.and_then(|channels| channels.enabled),
+            ),
+            allowed: channels_toml.and_then(|channels| channels.allowed.clone()),
+        };
+
         // Destructure every field to ensure ConfigRequirements additions are
         // either applied above or handled while constructing the final Config.
         let ConfigRequirements {
@@ -3267,6 +3308,7 @@ impl Config {
             bypass_hook_trust,
             additional_writable_roots,
             workspace_roots: workspace_roots_override,
+            channels: channels_override,
         } = overrides;
         let bypass_hook_trust = bypass_hook_trust.unwrap_or_default();
 
@@ -4103,6 +4145,16 @@ impl Config {
             include_skill_instructions,
             orchestrator_skills_enabled,
             orchestrator_mcp_enabled,
+            channels_entries: {
+                let mut entries = codex_channels::split_channel_entries(
+                    channels_toml
+                        .and_then(|channels| channels.entries.as_deref())
+                        .unwrap_or_default(),
+                );
+                entries.extend(codex_channels::split_channel_entries(&channels_override));
+                entries
+            },
+            channels_policy,
             include_environment_context,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"
             // is important in code to differentiate the mode from the store implementation.

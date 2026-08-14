@@ -31,6 +31,7 @@ members = [
     "cloud-tasks",
     "cloud-tasks-client",
     "cloud-tasks-mock-client",
+    "channels",
     "cli",
     "collaboration-mode-templates",
     "connectors",
@@ -55,6 +56,7 @@ members = [
     "execpolicy",
     "ext/agent",
     "ext/connectors",
+    "ext/crost-memory",
     "ext/extension-api",
     "ext/goal",
     "ext/git-attribution",
@@ -166,6 +168,7 @@ codex-apply-patch = { path = "apply-patch" }
 codex-arg0 = { path = "arg0" }
 codex-async-utils = { path = "async-utils" }
 codex-backend-client = { path = "backend-client" }
+codex-channels = { path = "channels" }
 codex-chatgpt = { path = "chatgpt" }
 codex-cli = { path = "cli" }
 codex-client = { path = "codex-client" }
@@ -184,6 +187,7 @@ codex-connectors = { path = "connectors" }
 codex-agent-extension = { path = "ext/agent" }
 codex-connectors-extension = { path = "ext/connectors" }
 codex-context-fragments = { path = "context-fragments" }
+codex-crost-memory-extension = { path = "ext/crost-memory" }
 codex-core = { path = "core" }
 codex-core-api = { path = "core-api" }
 codex-core-plugins = { path = "core-plugins" }
@@ -290,6 +294,7 @@ arc-swap = "1.9.0"
 assert_cmd = "2"
 assert_matches = "1.5.0"
 async-channel = "2.3.1"
+async-trait = "0.1.89"
 async-io = "2.6.0"
 async-stream = "0.3.6"
 aws-config = "1"

@@ -44,6 +44,8 @@ use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
 pub(crate) struct SessionServices {
+    /// Session-scoped channel state: resolved opt-ins and pending events.
+    pub(crate) channel_hub: Arc<crate::channels::ChannelHub>,
     /// The single owner of live MCP connections for this thread.
     pub(crate) mcp_runtime: Arc<McpRuntime>,
     /// Immutable MCP handlers scoped to this thread's current binding.

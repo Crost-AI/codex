@@ -3366,6 +3366,32 @@ impl Session {
         state.session_configuration.collaboration_mode.clone()
     }
 
+    /// Plain-text session summary for host-executed channel `/status`
+    /// commands (see `crate::channels`). Lives here because the
+    /// `SessionConfiguration` fields it reads are module-private.
+    pub(crate) async fn channel_status_text(&self) -> String {
+        let (model, cwd, approval_policy, sandbox_policy) = {
+            let state = self.state.lock().await;
+            let session_configuration = &state.session_configuration;
+            (
+                session_configuration.collaboration_mode.model().to_string(),
+                session_configuration.cwd().display().to_string(),
+                session_configuration.approval_policy.value().to_string(),
+                format!("{:?}", session_configuration.sandbox_policy()),
+            )
+        };
+        format!(
+            "Session: {}\nThread: {}\nModel: {}\nWorking directory: {}\n\
+             Approval policy: {}\nSandbox: {}",
+            self.session_id(),
+            self.thread_id(),
+            model,
+            cwd,
+            approval_policy,
+            sandbox_policy,
+        )
+    }
+
     pub(crate) fn multi_agent_version(&self) -> Option<MultiAgentVersion> {
         self.multi_agent_version.get().copied()
     }

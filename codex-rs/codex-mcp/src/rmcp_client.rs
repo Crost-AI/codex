@@ -56,6 +56,7 @@ use codex_protocol::protocol::McpStartupStatus;
 use codex_protocol::protocol::McpStartupUpdateEvent;
 use codex_rmcp_client::ExecutorStdioServerLauncher;
 use codex_rmcp_client::LocalStdioServerLauncher;
+use codex_rmcp_client::CustomNotificationHandler;
 use codex_rmcp_client::McpProtocolMode;
 use codex_rmcp_client::RmcpClient;
 use codex_rmcp_client::StdioServerLauncher;
@@ -110,6 +111,13 @@ pub(crate) struct ManagedClient {
     pub(crate) tool_timeout: Option<Duration>,
     pub(crate) server_instructions: Option<String>,
     pub(crate) server_supports_sandbox_state_meta_capability: bool,
+    /// Whether the server declared the experimental `codex/channel`
+    /// capability in its initialize result.
+    pub(crate) declares_channel_capability: bool,
+    /// The `commands` reply-routing descriptor from the `codex/channel`
+    /// capability value, when the server opted into host-executed slash
+    /// commands.
+    pub(crate) channel_commands_descriptor: Option<codex_channels::ChannelCommandsDescriptor>,
     pub(crate) codex_apps_tools_cache_context: Option<ConnectorRuntimeContext<ToolInfo>>,
 }
 
@@ -285,6 +293,7 @@ struct ManagedClientStartup {
     client_mcp_extensions: ClientMcpExtensions,
     protocol_mode: McpProtocolMode,
     catalog_item_limit: usize,
+    channel_notification_handler: Option<CustomNotificationHandler>,
     cancel_token: CancellationToken,
     startup_complete: Arc<AtomicBool>,
 }
@@ -307,6 +316,7 @@ impl ManagedClientStartup {
             client_mcp_extensions,
             protocol_mode,
             catalog_item_limit,
+            channel_notification_handler,
             cancel_token,
             startup_complete,
         } = self.clone();
@@ -362,6 +372,7 @@ impl ManagedClientStartup {
                         client_elicitation_capability,
                         client_mcp_extensions,
                         catalog_item_limit,
+                        channel_notification_handler,
                     },
                 )
                 .await
@@ -426,6 +437,7 @@ impl AsyncManagedClient {
         client_mcp_extensions: ClientMcpExtensions,
         protocol_mode: McpProtocolMode,
         catalog_item_limit: usize,
+        channel_notification_handler: Option<CustomNotificationHandler>,
     ) -> Self {
         let is_codex_apps_mcp_server = server_name == CODEX_APPS_MCP_SERVER_NAME;
         let reconnect_server_name = server_name.clone();
@@ -454,6 +466,7 @@ impl AsyncManagedClient {
             client_mcp_extensions,
             protocol_mode,
             catalog_item_limit,
+            channel_notification_handler,
             cancel_token: cancel_token.clone(),
             startup_complete: Arc::clone(&startup_complete),
         });
@@ -874,13 +887,19 @@ async fn start_server_task(
         client_elicitation_capability,
         client_mcp_extensions,
         catalog_item_limit,
+        channel_notification_handler,
     } = params;
     let params =
         mcp_initialize_request_params(client_elicitation_capability, client_mcp_extensions);
     let send_elicitation = elicitation_requests.make_sender(server_name.clone(), tx_event);
 
     let initialize_result = client
-        .initialize(params, startup_timeout, send_elicitation)
+        .initialize(
+            params,
+            startup_timeout,
+            send_elicitation,
+            channel_notification_handler,
+        )
         .await
         .map_err(StartupOutcomeError::from)?;
 
@@ -903,6 +922,14 @@ async fn start_server_task(
         .as_ref()
         .and_then(|exp| exp.get(MCP_SANDBOX_STATE_META_CAPABILITY))
         .is_some();
+    let channel_capability_value = initialize_result
+        .capabilities
+        .experimental
+        .as_ref()
+        .and_then(|exp| exp.get(codex_channels::CHANNEL_CAPABILITY));
+    let declares_channel_capability = channel_capability_value.is_some();
+    let channel_commands_descriptor =
+        channel_capability_value.and_then(codex_channels::parse_channel_commands_descriptor);
     let list_start = Instant::now();
     let fetch_ticket = codex_apps_tools_cache_context
         .as_ref()
@@ -950,6 +977,8 @@ async fn start_server_task(
         tool_timeout: None,
         server_instructions: initialize_result.instructions,
         server_supports_sandbox_state_meta_capability,
+        declares_channel_capability,
+        channel_commands_descriptor,
         codex_apps_tools_cache_context,
     };
 
@@ -1012,6 +1041,7 @@ struct StartServerTaskParams {
     client_elicitation_capability: ElicitationCapability,
     client_mcp_extensions: ClientMcpExtensions,
     catalog_item_limit: usize,
+    channel_notification_handler: Option<CustomNotificationHandler>,
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -217,6 +217,7 @@ impl McpConnectionSet {
             codex_apps_auth_manager,
             elicitation_reviewer,
             elicitation_lifecycle,
+            channel_wiring,
         } = input;
         let store_mode = config.mcp_oauth_credentials_store_mode;
         let keyring_backend_kind = config.auth_keyring_backend_kind;
@@ -495,6 +496,9 @@ impl McpConnectionSet {
                 None
             };
             let has_runtime_auth = runtime_auth_provider.is_some();
+            let channel_notification_handler = channel_wiring
+                .as_ref()
+                .and_then(|wiring| wiring.handler_for(&server_name));
             let async_managed_client = AsyncManagedClient::new(
                 server_name.clone(),
                 startup_submit_id.clone(),
@@ -513,6 +517,7 @@ impl McpConnectionSet {
                 client_mcp_extensions.clone(),
                 protocol_mode,
                 catalog_item_limit,
+                channel_notification_handler,
             );
             let defer_startup = allow_deferred_startup
                 && !tool_plugin_provenance.is_selected_plugin_mcp_server(&server_name)
@@ -884,6 +889,38 @@ impl McpConnectionSet {
             .with_context(|| format!("tool call failed for `{server}/{tool}`"))?;
 
         Ok(call_tool_result_from_rmcp(result))
+    }
+
+    /// Returns the `commands` reply-routing descriptor a server declared in
+    /// its `codex/channel` capability value, when it opted into
+    /// host-executed slash commands. `None` for unknown servers, failed
+    /// startups, and servers without the descriptor.
+    pub async fn channel_commands_descriptor(
+        &self,
+        server: &str,
+    ) -> Option<codex_channels::ChannelCommandsDescriptor> {
+        self.servers
+            .get(server)?
+            .connection
+            .client()
+            .await
+            .ok()?
+            .channel_commands_descriptor
+    }
+
+    /// Returns, for each connected server, whether it declared the
+    /// experimental `codex/channel` capability during initialization.
+    /// Servers whose startup failed (or is still pending after failure) are
+    /// omitted.
+    pub async fn list_channel_capabilities(&self) -> HashMap<String, bool> {
+        let mut capabilities = HashMap::new();
+        for (server_name, view) in &self.servers {
+            if let Ok(managed_client) = view.connection.client().await {
+                capabilities
+                    .insert(server_name.clone(), managed_client.declares_channel_capability);
+            }
+        }
+        capabilities
     }
 
     /// Returns presentation metadata from the current connection.

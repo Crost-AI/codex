@@ -670,6 +670,7 @@ impl App {
             self.chat_widget.thread_id(),
             self.chat_widget.thread_name(),
             self.chat_widget.rollout_path().as_deref(),
+            self.chat_widget.channels_entries(),
         );
         self.shutdown_current_thread(app_server).await;
         let tracked_thread_ids: Vec<ThreadId> =
@@ -1010,6 +1011,7 @@ impl App {
             self.chat_widget.thread_id(),
             self.chat_widget.thread_name(),
             self.chat_widget.rollout_path().as_deref(),
+            self.chat_widget.channels_entries(),
         );
         match app_server
             .resume_thread(

@@ -5846,6 +5846,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     )
     .expect("initialize test hooks");
     let services = SessionServices {
+        channel_hub: Arc::new(crate::channels::ChannelHub::new()),
         mcp_runtime,
         mcp_handler_cache: Default::default(),
         unified_exec_manager: UnifiedExecProcessManager::new(
@@ -8041,6 +8042,7 @@ where
     )
     .expect("initialize test hooks");
     let services = SessionServices {
+        channel_hub: Arc::new(crate::channels::ChannelHub::new()),
         mcp_runtime,
         mcp_handler_cache: Default::default(),
         unified_exec_manager: UnifiedExecProcessManager::new(

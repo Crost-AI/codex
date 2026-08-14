@@ -70,6 +70,16 @@ pub struct SharedCliOptions {
     /// Additional directories that should be writable alongside the primary workspace.
     #[arg(long = "add-dir", value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     pub add_dir: Vec<PathBuf>,
+
+    /// MCP servers allowed to push channel events into this session, as
+    /// `server:<name>` entries (repeatable or comma-separated).
+    #[arg(
+        long = "channels",
+        value_name = "ENTRY",
+        value_delimiter = ',',
+        num_args = 1..
+    )]
+    pub channels: Vec<String>,
 }
 
 impl SharedCliOptions {
@@ -104,6 +114,7 @@ impl SharedCliOptions {
             bypass_hook_trust,
             cwd,
             add_dir,
+            channels,
         } = self;
         let Self {
             images: root_images,
@@ -117,6 +128,7 @@ impl SharedCliOptions {
             bypass_hook_trust: root_bypass_hook_trust,
             cwd: root_cwd,
             add_dir: root_add_dir,
+            channels: root_channels,
         } = root;
 
         if model.is_none() {
@@ -153,6 +165,11 @@ impl SharedCliOptions {
             merged_add_dir.append(add_dir);
             *add_dir = merged_add_dir;
         }
+        if !root_channels.is_empty() {
+            let mut merged_channels = root_channels.clone();
+            merged_channels.append(channels);
+            *channels = merged_channels;
+        }
     }
 
     pub fn apply_subcommand_overrides(&mut self, subcommand: Self) {
@@ -171,6 +188,7 @@ impl SharedCliOptions {
             bypass_hook_trust,
             cwd,
             add_dir,
+            channels,
         } = subcommand;
 
         if let Some(model) = model {
@@ -202,6 +220,9 @@ impl SharedCliOptions {
         }
         if !add_dir.is_empty() {
             self.add_dir.extend(add_dir);
+        }
+        if !channels.is_empty() {
+            self.channels.extend(channels);
         }
     }
 }

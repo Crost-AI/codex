@@ -1222,6 +1222,7 @@ impl Session {
                 .enabled(Feature::ExecutedToolCallMetadata)
                 .then(|| Arc::new(crate::state::ExecutedToolCallRecorder::default()));
             let services = SessionServices {
+                channel_hub: Arc::new(crate::channels::ChannelHub::new()),
                 // Start with an empty connection set. The initialized set is
                 // published after SessionConfigured so MCP events follow it.
                 mcp_runtime,
@@ -1403,6 +1404,21 @@ impl Session {
             } else {
                 mcp_projection
             };
+            // Channels bind to the ROOT session only. Subagent and internal
+            // threads inherit the same config (including `--channels`
+            // entries), so without this gate every spawned thread would run
+            // its own bridge process with the same credentials — each copy
+            // receives every inbound message, and an idle subagent answers
+            // while the busy root session is still queueing the event.
+            // Leaving the hub unconfigured means no credential overlay (the
+            // thread's bridge gets no token) and no notification listener.
+            if !matches!(
+                session_configuration.session_source,
+                SessionSource::SubAgent(_) | SessionSource::Internal(_)
+            ) {
+                sess.services.channel_hub.configure(&config);
+            }
+            sess.services.channel_hub.attach_session(&sess);
             sess.install_initial_mcp_runtime(
                 &session_configuration,
                 latest_auth,

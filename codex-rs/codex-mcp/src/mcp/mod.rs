@@ -49,6 +49,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::McpProtocolMode;
 use crate::ResolvedMcpCatalog;
+use crate::catalog::McpServerSource;
 use crate::connection_manager::McpConnectionSet;
 use crate::runtime::McpPublicationGate;
 use crate::runtime::McpRuntimeContext;
@@ -377,6 +378,7 @@ pub async fn read_mcp_resource(
             codex_apps_auth_manager: None,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
+            channel_wiring: None,
         },
         crate::elicitation::ElicitationRequestRouter::default(),
     )
@@ -397,6 +399,62 @@ pub struct McpServerStatusSnapshot {
     pub resource_templates: HashMap<String, Vec<ResourceTemplate>>,
     pub auth_statuses: HashMap<String, McpAuthStatus>,
     pub server_names: Vec<String>,
+    /// Whether each connected server declared the experimental
+    /// `codex/channel` capability. Absent for servers that failed to start.
+    pub channel_capabilities: HashMap<String, bool>,
+}
+
+/// Human-readable provenance of one winning MCP server definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerSourceInfo {
+    /// Label of the winning definition's source (e.g. "config.toml").
+    pub source: String,
+    /// Labels of same-name definitions that lost to the winner.
+    pub overridden_sources: Vec<String>,
+}
+
+fn mcp_server_source_label(source: &McpServerSource) -> String {
+    match source {
+        McpServerSource::Config => "config.toml".to_string(),
+        McpServerSource::Plugin(attribution) => {
+            format!("plugin `{}`", attribution.plugin_id())
+        }
+        McpServerSource::SelectedPlugin(attribution) => {
+            format!("selected plugin `{}`", attribution.plugin_id())
+        }
+        McpServerSource::Compatibility { id } => format!("compatibility `{id}`"),
+        McpServerSource::Extension { id } => format!("extension `{id}`"),
+    }
+}
+
+/// Returns, per configured server name, which definition source won and which
+/// same-name registrations it overrode (highest-precedence loser first).
+pub fn mcp_server_sources(config: &McpConfig) -> HashMap<String, McpServerSourceInfo> {
+    config
+        .mcp_server_catalog
+        .configured_servers()
+        .keys()
+        .map(|name| {
+            let mut sources = config.mcp_server_catalog.registration_sources_for(name);
+            let source = sources
+                .pop()
+                .as_ref()
+                .map(mcp_server_source_label)
+                .unwrap_or_else(|| "config.toml".to_string());
+            let overridden_sources = sources
+                .iter()
+                .rev()
+                .map(mcp_server_source_label)
+                .collect();
+            (
+                name.clone(),
+                McpServerSourceInfo {
+                    source,
+                    overridden_sources,
+                },
+            )
+        })
+        .collect()
 }
 
 pub async fn collect_mcp_server_status_snapshot_with_detail(
@@ -417,6 +475,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
             resource_templates: HashMap::new(),
             auth_statuses: HashMap::new(),
             server_names: Vec::new(),
+            channel_capabilities: HashMap::new(),
         };
     }
 
@@ -455,6 +514,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
             codex_apps_auth_manager: None,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
+            channel_wiring: None,
         },
         crate::elicitation::ElicitationRequestRouter::default(),
     )
@@ -696,11 +756,12 @@ async fn collect_mcp_server_status_snapshot_from_manager(
     server_names: Vec<String>,
     detail: McpSnapshotDetail,
 ) -> McpServerStatusSnapshot {
-    let ((server_infos, tools), resources, resource_templates) = tokio::join!(
+    let ((server_infos, tools, channel_capabilities), resources, resource_templates) = tokio::join!(
         async {
             let server_infos = mcp_connection_manager.list_available_server_infos().await;
             let tools = mcp_connection_manager.list_all_tools().await;
-            (server_infos, tools)
+            let channel_capabilities = mcp_connection_manager.list_channel_capabilities().await;
+            (server_infos, tools, channel_capabilities)
         },
         async {
             if detail.include_resources() {
@@ -740,6 +801,7 @@ async fn collect_mcp_server_status_snapshot_from_manager(
         resource_templates: convert_mcp_resource_templates(resource_templates),
         auth_statuses: auth_statuses_from_entries(&auth_status_entries),
         server_names,
+        channel_capabilities,
     }
 }
 

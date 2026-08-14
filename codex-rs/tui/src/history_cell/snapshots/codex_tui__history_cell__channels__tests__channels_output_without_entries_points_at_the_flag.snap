@@ -1,0 +1,11 @@
+---
+source: tui/src/history_cell/channels_tests.rs
+assertion_line: 83
+expression: render(&cell)
+---
+/channels
+
+📡  Channels
+
+  • No channels are enabled for this session.
+    Launch with --channels server:<name> (or set [channels] entries) to let an MCP server push events.

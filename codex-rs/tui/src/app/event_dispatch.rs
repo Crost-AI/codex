@@ -224,6 +224,7 @@ impl App {
                     self.chat_widget.thread_id(),
                     self.chat_widget.thread_name(),
                     self.chat_widget.rollout_path().as_deref(),
+                    self.chat_widget.channels_entries(),
                 );
                 self.chat_widget
                     .add_plain_history_lines(vec!["/fork".magenta().into()]);
@@ -1010,15 +1011,20 @@ impl App {
                         .on_plugin_enabled_set(cwd, plugin_id, enabled, result);
                 }
             }
-            AppEvent::FetchMcpInventory { detail, thread_id } => {
-                self.fetch_mcp_inventory(app_server, detail, thread_id);
+            AppEvent::FetchMcpInventory {
+                detail,
+                thread_id,
+                purpose,
+            } => {
+                self.fetch_mcp_inventory(app_server, detail, thread_id, purpose);
             }
             AppEvent::McpInventoryLoaded {
                 result,
                 detail,
                 thread_id,
+                purpose,
             } => {
-                self.handle_mcp_inventory_result(result, detail, thread_id);
+                self.handle_mcp_inventory_result(result, detail, thread_id, purpose);
             }
             AppEvent::SkillsListLoaded { result } => {
                 self.handle_skills_list_result(

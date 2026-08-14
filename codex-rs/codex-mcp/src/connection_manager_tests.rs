@@ -420,6 +420,8 @@ async fn create_test_managed_client(tools: Vec<ToolInfo>) -> ManagedClient {
         tool_timeout: None,
         server_instructions: None,
         server_supports_sandbox_state_meta_capability: false,
+        declares_channel_capability: false,
+        channel_commands_descriptor: None,
         codex_apps_tools_cache_context: None,
     }
 }
@@ -503,6 +505,7 @@ async fn create_test_manager_with_ready_apps_client(
             .with_protocol_version(ProtocolVersion::V_2025_06_18),
             Some(Duration::from_secs(5)),
             Box::new(|_, _| async { Err(anyhow!("unexpected elicitation")) }.boxed()),
+            /*custom_notification_handler*/ None,
         )
         .await?;
 
@@ -513,6 +516,8 @@ async fn create_test_manager_with_ready_apps_client(
         tool_timeout: Some(Duration::from_secs(5)),
         server_instructions: None,
         server_supports_sandbox_state_meta_capability: false,
+        declares_channel_capability: false,
+        channel_commands_descriptor: None,
         codex_apps_tools_cache_context: Some(cache_context.clone()),
     };
     let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
@@ -3619,6 +3624,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
             codex_apps_auth_manager: None,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
+            channel_wiring: None,
         },
         ElicitationRequestRouter::default(),
     )
@@ -4013,6 +4019,7 @@ async fn reconcile_reusable_server(
             codex_apps_auth_manager: None,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
+            channel_wiring: None,
         },
         ElicitationRequestRouter::default(),
     )
@@ -4054,6 +4061,7 @@ async fn reconciliation_reuses_connection_without_relisting_regular_tools() -> a
                 }
                 .boxed()
             }),
+            /*custom_notification_handler*/ None,
         )
         .await?;
     let initial_tools = list_tools_for_client_uncached(
@@ -4073,6 +4081,8 @@ async fn reconciliation_reuses_connection_without_relisting_regular_tools() -> a
         tool_timeout: None,
         server_instructions: initialize.instructions,
         server_supports_sandbox_state_meta_capability: false,
+        declares_channel_capability: false,
+        channel_commands_descriptor: None,
         codex_apps_tools_cache_context: None,
     };
     let runtime_context = reusable_server_runtime_context();
@@ -4550,6 +4560,7 @@ async fn reconciliation_replaces_closed_connections() -> anyhow::Result<()> {
             .with_protocol_version(ProtocolVersion::V_2025_06_18),
             /*timeout*/ None,
             Box::new(|_, _| async { Err(anyhow!("unexpected elicitation")) }.boxed()),
+            /*custom_notification_handler*/ None,
         )
         .await?;
     let view = previous

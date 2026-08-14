@@ -1,5 +1,7 @@
 pub use binding::McpBinding;
 pub use binding::PreparedMcpCall;
+pub use channels::ChannelEventSink;
+pub use channels::ChannelWiring;
 pub use client_capabilities::client_mcp_extensions;
 pub use codex_rmcp_client::McpProtocolMode;
 pub use connection_manager::tool_is_model_visible;
@@ -68,8 +70,10 @@ pub use plugin_config::parse_agent_plugin_mcp_config;
 pub use plugin_config::parse_executor_plugin_mcp_config;
 pub use plugin_config::parse_plugin_mcp_config;
 
+pub use mcp::McpServerSourceInfo;
 pub use mcp::McpServerStatusSnapshot;
 pub use mcp::McpSnapshotDetail;
+pub use mcp::mcp_server_sources;
 pub use mcp::collect_mcp_server_status_snapshot_with_detail;
 pub use mcp::read_mcp_resource;
 
@@ -93,6 +97,7 @@ pub(crate) mod auth_elicitation;
 mod binding;
 pub(crate) mod binding_clients;
 mod catalog;
+mod channels;
 mod client_capabilities;
 pub(crate) mod codex_apps;
 pub(crate) mod connection_manager;

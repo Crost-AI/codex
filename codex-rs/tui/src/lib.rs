@@ -1105,6 +1105,7 @@ pub async fn run_main(
         show_raw_agent_reasoning: cli.oss.then_some(true),
         bypass_hook_trust: cli.bypass_hook_trust.then_some(true),
         additional_writable_roots: additional_dirs,
+        channels: cli.channels.clone(),
         ..Default::default()
     };
 

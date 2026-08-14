@@ -109,6 +109,7 @@ impl AppsRequestProcessor {
                         codex_apps_auth_manager,
                         elicitation_reviewer: None,
                         elicitation_lifecycle: None,
+                        channel_wiring: None,
                     })
                     .await;
 

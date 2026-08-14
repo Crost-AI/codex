@@ -180,7 +180,25 @@ impl Session {
             .entry(codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string())
             .or_insert_with(|| PathUri::from_abs_path(&desired.config.cwd));
         let mcp_config = Arc::new(config);
-        let mcp_servers = effective_mcp_servers(&mcp_config, auth.as_ref());
+        let mut mcp_servers = effective_mcp_servers(&mcp_config, auth.as_ref());
+        // Channels: resolve this thread's opt-ins against the server set,
+        // overlay `~/.codex/channels/<server>/.env` credentials onto the
+        // opted-in stdio servers BEFORE they are spawned, and build the
+        // notification wiring the connection set installs per server. Every
+        // runtime install and rebuild flows through here, so the resolution
+        // always matches the servers actually being started.
+        let tool_plugin_provenance = codex_mcp::tool_plugin_provenance(&mcp_config);
+        let channel_setup = self
+            .services
+            .channel_hub
+            .refresh_setup(&tool_plugin_provenance, &mcp_servers);
+        crate::channels::apply_channel_env_overlay(
+            &mut mcp_servers,
+            &channel_setup.active_servers,
+            &mcp_config.codex_home,
+        );
+        let channel_wiring =
+            crate::channels::channel_wiring_for_hub(&self.services.channel_hub, &channel_setup);
         let runtime_context = McpRuntimeContext::new(
             self.services.turn_environments.environment_manager(),
             desired.local_process_cwd.clone(),
@@ -211,6 +229,7 @@ impl Session {
             codex_apps_auth_manager,
             elicitation_reviewer,
             elicitation_lifecycle: Some(self.mcp_elicitation_lifecycle()),
+            channel_wiring,
         }
     }
 }

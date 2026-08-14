@@ -47,6 +47,7 @@ pub use perform_oauth_login::perform_oauth_login_silent;
 pub use protocol_mode::McpProtocolMode;
 pub use rmcp::model::ElicitationAction;
 pub use rmcp_client::CancellableEventStreamRequest;
+pub use rmcp_client::CustomNotificationHandler;
 pub use rmcp_client::Elicitation;
 pub use rmcp_client::ElicitationResponse;
 pub use rmcp_client::ListToolsWithConnectorIdResult;
