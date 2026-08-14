@@ -24,6 +24,7 @@ impl ChatWidget {
             .set_queue_submissions(/*queue_submissions*/ false);
         if previous_thread_id != self.thread_id {
             self.review.recent_auto_review_denials = RecentAutoReviewDenials::default();
+            self.clear_thread_usage_state();
         }
         self.refresh_plan_mode_nudge();
         self.turn_lifecycle.reset_thread();
@@ -103,6 +104,9 @@ impl ChatWidget {
                 self.refresh_plan_mode_nudge();
             }
         }
+        let effort = self.effective_reasoning_effort();
+        self.bottom_pane
+            .set_active_reasoning_effort_baseline(effort.as_ref());
         self.refresh_model_display();
         self.refresh_status_surfaces();
         self.sync_service_tier_commands();

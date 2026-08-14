@@ -10,6 +10,7 @@ use codex_tools::ToolCall;
 use codex_tools::ToolExecutor;
 
 use crate::ExtensionData;
+use crate::ExtensionMetrics;
 
 mod context;
 mod mcp;
@@ -28,7 +29,9 @@ pub use prompt::PromptFragment;
 pub use prompt::PromptSlot;
 pub use skill_invocation::SkillInvocationInput;
 pub use skill_invocation::SkillInvocationKind;
+pub use thread_lifecycle::ThreadIdleCause;
 pub use thread_lifecycle::ThreadIdleInput;
+pub use thread_lifecycle::ThreadOriginator;
 pub use thread_lifecycle::ThreadResumeInput;
 pub use thread_lifecycle::ThreadStartInput;
 pub use thread_lifecycle::ThreadStopInput;
@@ -77,6 +80,7 @@ pub trait McpServerContributor<C: Sync>: Send + Sync {
 /// fragment: thread/session context for stable inputs, and turn context for
 /// fragments that depend on turn-local host state.
 pub trait ContextContributor: Send + Sync {
+    /// Returns thread-scoped context using the supplied extension state.
     fn contribute_thread_context<'a>(
         &'a self,
         session_store: &'a ExtensionData,
@@ -116,8 +120,8 @@ pub trait ContextContributor: Send + Sync {
 /// Contributor for host-owned thread lifecycle gates.
 ///
 /// Implementations should use these callbacks to seed, rehydrate, or flush
-/// extension-private thread state. Heavy dependencies belong on the extension
-/// value created by the host, not in these inputs.
+/// extension-private thread state and retain any session capabilities supplied
+/// by the host. Other heavy dependencies belong on the extension value.
 pub trait ThreadLifecycleContributor<C: Sync>: Send + Sync {
     /// Called after host startup has initialized the thread-scoped store.
     fn on_thread_start<'a>(&'a self, input: ThreadStartInput<'a, C>) -> ExtensionFuture<'a, ()> {
@@ -203,10 +207,12 @@ pub trait TurnLifecycleContributor: Send + Sync {
 /// host-specific dependencies belong on the extension value installed by the
 /// host, not in this input.
 pub trait TurnInputContributor: Send + Sync {
-    /// Returns additional contextual fragments for one submitted turn.
+    /// Returns additional contextual fragments for one submitted turn. The optional metrics
+    /// capability is bound to the effective model for that turn.
     fn contribute<'a>(
         &'a self,
         input: TurnInputContext,
+        extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
         session_store: &'a ExtensionData,
         thread_store: &'a ExtensionData,
         turn_store: &'a ExtensionData,
@@ -269,26 +275,42 @@ pub trait SkillInvocationContributor: Send + Sync {
 
 /// Extension contribution that exposes native tools owned by a feature.
 pub trait ToolContributor: Send + Sync {
-    /// Returns the native tools visible for the supplied extension stores.
+    /// Returns native tools bound to the supplied extension state.
     fn tools(
         &self,
         session_store: &ExtensionData,
         thread_store: &ExtensionData,
     ) -> Vec<Arc<dyn ToolExecutor<ToolCall>>>;
+
+    /// Returns native tools bound to one sampling step.
+    fn tools_for_step(
+        &self,
+        session_store: &ExtensionData,
+        thread_store: &ExtensionData,
+        _step_store: &ExtensionData,
+    ) -> Vec<Arc<dyn ToolExecutor<ToolCall>>> {
+        self.tools(session_store, thread_store)
+    }
 }
 
 /// Contributor for host-owned tool lifecycle gates.
 ///
-/// Implementations should use these callbacks to observe tool execution without
-/// inspecting or rewriting tool input/output. Use `ToolContributor` for owning a
-/// tool implementation and hooks for policy that needs tool payloads.
+/// Implementations should use these callbacks to observe tool execution and its
+/// exposed input without rewriting the invocation. Use `ToolContributor` for
+/// owning a tool implementation and hooks for policy that changes tool payloads.
 pub trait ToolLifecycleContributor: Send + Sync {
-    /// Called once the host has accepted a tool call for execution.
+    /// Called after pre-tool hooks finalize an invocation and before execution.
+    ///
+    /// Calls blocked by hooks, or whose hook-provided input cannot be applied,
+    /// do not reach this callback.
     fn on_tool_start<'a>(&'a self, _input: ToolStartInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(std::future::ready(()))
     }
 
     /// Called after the tool call returns, is blocked, fails, or is cancelled.
+    ///
+    /// A matching start callback does not exist when execution is blocked,
+    /// hook-provided input cannot be applied, or cancellation wins first.
     fn on_tool_finish<'a>(&'a self, _input: ToolFinishInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(std::future::ready(()))
     }

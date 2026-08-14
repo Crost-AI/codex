@@ -49,7 +49,7 @@ use codex_login::CODEX_ACCESS_TOKEN_ENV_VAR;
 use codex_login::CODEX_API_KEY_ENV_VAR;
 use codex_login::CodexAuth;
 use codex_login::OPENAI_API_KEY_ENV_VAR;
-use codex_login::default_client::build_reqwest_client;
+use codex_login::default_client::create_client_without_request_logging;
 use codex_login::default_client::default_headers;
 use codex_login::load_auth_dot_json;
 use codex_model_provider::create_model_provider;
@@ -350,8 +350,9 @@ async fn build_report(
     let config_result = load_config(root_config_overrides, interactive, arg0_paths).await;
     match &config_result {
         Ok(config) => {
-            let auth_manager =
+            let auth_manager_result =
                 AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await;
+            let auth_manager = auth_manager_result.as_ref().ok().cloned();
             let reachability_plan = provider_reachability_plan(config);
             let (
                 config_check,
@@ -370,13 +371,27 @@ async fn build_report(
                 reachability_check,
             ) = tokio::join!(
                 async { run_sync_check("config", progress.clone(), || config_check(config)) },
-                async { run_sync_check("auth", progress.clone(), || auth_check(config)) },
+                async {
+                    run_sync_check("auth", progress.clone(), || match &auth_manager_result {
+                        Ok(_) => auth_check(config),
+                        Err(error) => DoctorCheck::new(
+                            "auth.load",
+                            "auth",
+                            CheckStatus::Fail,
+                            "authentication could not be initialized",
+                        )
+                        .detail(error.to_string())
+                        .remediation(
+                            "Fix the reported authentication error, then rerun codex doctor.",
+                        ),
+                    })
+                },
                 async { run_sync_check("updates", progress.clone(), || updates_check(config)) },
                 async { run_sync_check("network", progress.clone(), network_check) },
                 run_async_check(
                     "websocket",
                     progress.clone(),
-                    websocket_reachability_check(config, Some(auth_manager)),
+                    websocket_reachability_check(config, auth_manager),
                 ),
                 run_async_check("MCP", progress.clone(), mcp_check(config)),
                 async {
@@ -1089,7 +1104,10 @@ fn config_check(config: &Config) -> DoctorCheck {
     ));
     details.push(format!("model provider: {}", config.model_provider_id));
     details.push(format!("log dir: {}", config.log_dir.display()));
-    details.push(format!("sqlite home: {}", config.sqlite_home.display()));
+    details.push(format!(
+        "sqlite home: {}",
+        config.sqlite_config().home().display()
+    ));
     details.push(format!("mcp servers: {}", config.mcp_servers.get().len()));
     feature_flag_details(config, &mut details);
     config_toml_details(config, &mut details);
@@ -2163,11 +2181,18 @@ async fn state_check(config: &Config) -> DoctorCheck {
     let mut details = Vec::new();
     path_readiness(&mut details, "CODEX_HOME", &config.codex_home);
     path_readiness(&mut details, "log dir", &config.log_dir);
-    path_readiness(&mut details, "sqlite home", &config.sqlite_home);
+    path_readiness(&mut details, "sqlite home", config.sqlite_config().home());
     let mut integrity_failures = Vec::new();
-    for db in codex_state::runtime_db_paths(&config.sqlite_home) {
+    for db in config.sqlite_config().runtime_db_paths() {
         path_readiness(&mut details, db.label, &db.path);
-        sqlite_integrity_detail(&mut details, &mut integrity_failures, db.label, &db.path).await;
+        sqlite_integrity_detail(
+            config.sqlite_config(),
+            &mut details,
+            &mut integrity_failures,
+            db.label,
+            &db.path,
+        )
+        .await;
     }
     rollout_stats_details(&mut details, &config.codex_home);
     standalone_release_cache_details(&mut details);
@@ -2192,6 +2217,7 @@ async fn state_check(config: &Config) -> DoctorCheck {
 }
 
 async fn sqlite_integrity_detail(
+    sqlite: &codex_state::SqliteConfig,
     details: &mut Vec<String>,
     integrity_failures: &mut Vec<String>,
     label: &str,
@@ -2202,7 +2228,7 @@ async fn sqlite_integrity_detail(
         return;
     }
 
-    match codex_state::sqlite_integrity_check(path).await {
+    match codex_state::sqlite_integrity_check(sqlite, path).await {
         Ok(rows) if rows.iter().all(|row| row == "ok") => {
             details.push(format!("{label} integrity: ok"));
         }
@@ -2398,10 +2424,6 @@ async fn websocket_reachability_check(
         Ok(Ok(probe)) => {
             details.push(format!("handshake result: HTTP {}", probe.status));
             details.push(format!("reasoning header: {}", probe.reasoning_included));
-            details.push(format!(
-                "models etag present: {}",
-                probe.models_etag_present
-            ));
             details.push(format!(
                 "server model present: {}",
                 probe.server_model_present
@@ -2885,7 +2907,7 @@ async fn mcp_http_probe_url_with_timeout(url: &str, timeout: Duration) -> Result
 }
 
 async fn http_probe_url_with_timeout(url: &str, timeout: Duration) -> Result<String, String> {
-    let response = build_reqwest_client()
+    let response = create_client_without_request_logging()
         .head(url)
         .timeout(timeout)
         .send()
@@ -2911,7 +2933,7 @@ async fn http_get_probe_url_with_timeout(url: &str, timeout: Duration) -> Result
 }
 
 async fn http_get_probe_status_with_timeout(url: &str, timeout: Duration) -> Result<u16, String> {
-    let response = build_reqwest_client()
+    let response = create_client_without_request_logging()
         .get(url)
         .timeout(timeout)
         .send()

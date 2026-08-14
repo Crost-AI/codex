@@ -7,10 +7,12 @@ use std::time::Duration;
 use anyhow::Result;
 use anyhow::anyhow;
 use chrono::DateTime;
+use chrono::Local;
 use chrono::Utc;
 use codex_core::SleepFuture;
 use codex_core::TimeFuture;
 use codex_core::TimeProvider;
+use codex_core::TurnInputRequest;
 use codex_core::config::CurrentTimeReminderConfig;
 use codex_features::CurrentTimeReminderDeliveryMode;
 use codex_features::CurrentTimeSource;
@@ -39,10 +41,14 @@ use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
-const FIRST_REMINDER: &str = "It is 2026-06-17 17:34:15 UTC.";
-const EARLIER_REMINDER: &str = "It is 2026-06-17 17:33:15 UTC.";
-const SECOND_REMINDER: &str = "It is 2026-06-17 17:35:15 UTC.";
-const THIRD_REMINDER: &str = "It is 2026-06-17 17:36:15 UTC.";
+const FIRST_REMINDER: &str =
+    "<current_time_reminder>It is 2026-06-17 17:34:15 UTC.</current_time_reminder>";
+const EARLIER_REMINDER: &str =
+    "<current_time_reminder>It is 2026-06-17 17:33:15 UTC.</current_time_reminder>";
+const SECOND_REMINDER: &str =
+    "<current_time_reminder>It is 2026-06-17 17:35:15 UTC.</current_time_reminder>";
+const THIRD_REMINDER: &str =
+    "<current_time_reminder>It is 2026-06-17 17:36:15 UTC.</current_time_reminder>";
 const FIRST_TIME_UNIX_SECONDS: i64 = 1_781_717_655;
 
 struct TestTimeProvider {
@@ -91,7 +97,7 @@ fn current_time_reminders(request: &ResponsesRequest) -> Vec<String> {
     request
         .message_input_texts("developer")
         .into_iter()
-        .filter(|text| text.starts_with("It is "))
+        .filter(|text| text.starts_with("<current_time_reminder>"))
         .collect()
 }
 
@@ -100,6 +106,7 @@ fn enable_current_time_reminder(
     interval: u64,
     clock_source: CurrentTimeSource,
 ) {
+    config.include_environment_context = false;
     config
         .features
         .enable(Feature::CurrentTimeReminder)
@@ -109,6 +116,56 @@ fn enable_current_time_reminder(
         clock_source,
         ..CurrentTimeReminderConfig::default()
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn environment_context_uses_external_current_time_on_each_turn() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+            sse(vec![ev_response_created("resp-2"), ev_completed("resp-2")]),
+        ],
+    )
+    .await;
+    let time_provider = Arc::new(TestTimeProvider::default());
+    let test = test_codex()
+        .with_config(|config| {
+            enable_current_time_reminder(config, /*interval*/ 0, CurrentTimeSource::External);
+            config.include_environment_context = true;
+        })
+        .with_external_time_provider(time_provider.clone())
+        .build_with_auto_env(&server)
+        .await?;
+
+    test.submit_turn("first simulated day").await?;
+    time_provider
+        .current_time
+        .store(FIRST_TIME_UNIX_SECONDS + 86_400, Ordering::Relaxed);
+    test.submit_turn("second simulated day").await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    for (request, timestamp) in requests
+        .iter()
+        .zip([FIRST_TIME_UNIX_SECONDS, FIRST_TIME_UNIX_SECONDS + 86_400])
+    {
+        let current_date = DateTime::<Utc>::from_timestamp(timestamp, 0)
+            .expect("test timestamp should be valid")
+            .with_timezone(&Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        assert!(request.message_input_texts("user").iter().any(|text| {
+            text.contains("<environment_context>")
+                && text.contains(&format!("<current_date>{current_date}</current_date>"))
+        }));
+    }
+    assert_eq!(current_time_reminders(&requests[0]), vec![SECOND_REMINDER]);
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -287,7 +344,7 @@ async fn system_time_source_adds_current_time_reminder() -> Result<()> {
     let reminders = current_time_reminders(&responses.single_request());
     assert_eq!(reminders.len(), 1);
     assert_regex_match(
-        r"^It is \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\.$",
+        r"^<current_time_reminder>It is \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\.</current_time_reminder>$",
         &reminders[0],
     );
 
@@ -368,23 +425,18 @@ async fn time_provider_failure_stops_before_inference() -> Result<()> {
     .await;
     let test = test_codex()
         .with_config(|config| {
-            enable_current_time_reminder(config, /*interval*/ 1, CurrentTimeSource::External)
+            enable_current_time_reminder(config, /*interval*/ 1, CurrentTimeSource::External);
+            config.include_environment_context = true;
         })
         .with_external_time_provider(Arc::new(FailingTimeProvider))
-        .build(&server)
+        .build_with_auto_env(&server)
         .await?;
 
     test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "fail before inference".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "fail before inference".into(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
 
     let EventMsg::Error(error) =
@@ -447,7 +499,7 @@ async fn current_time_tool_returns_the_latest_time() -> Result<()> {
     );
     assert_eq!(
         requests[1].function_call_output_text(CALL_ID),
-        Some(SECOND_REMINDER.to_string())
+        Some("It is 2026-06-17 17:35:15 UTC.".to_string())
     );
 
     Ok(())

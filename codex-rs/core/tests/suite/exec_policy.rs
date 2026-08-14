@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use codex_config::test_support::CloudConfigBundleFixture;
+use codex_core::TurnInputRequest;
 use codex_features::Feature;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
@@ -12,6 +13,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::GranularApprovalConfig;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -53,23 +55,20 @@ async fn submit_user_turn(
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(permission_profile, test.config.cwd.as_path());
     test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
                 text: prompt.into(),
                 text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
                 environments: Some(local_selections(test.config.cwd.clone())),
                 approval_policy: Some(approval_policy),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
                 collaboration_mode: collaboration_mode.or({
-                    Some(codex_protocol::config_types::CollaborationMode {
-                        mode: codex_protocol::config_types::ModeKind::Default,
-                        settings: codex_protocol::config_types::Settings {
+                    Some(CollaborationMode {
+                        mode: ModeKind::Default,
+                        settings: Settings {
                             model: session_model,
                             reasoning_effort: None,
                             developer_instructions: None,
@@ -77,8 +76,8 @@ async fn submit_user_turn(
                     })
                 }),
                 ..Default::default()
-            },
-        })
+            }),
+        )
         .await?;
     Ok(())
 }
@@ -92,6 +91,55 @@ fn assert_no_matched_rules_invariant(output_item: &Value) {
         !output.contains("invariant failed: matched_rules must be non-empty"),
         "unexpected invariant panic surfaced in output: {output}"
     );
+}
+
+#[tokio::test]
+async fn startup_migrates_default_policy_and_honors_ignore_rules() -> Result<()> {
+    const LEGACY_POLICY: &str = r#"prefix_rule(pattern=["rm"], decision="allow")
+prefix_rule(pattern=["git", "status"], decision="allow")
+"#;
+    const MIGRATED_POLICY: &str = r#"prefix_rule(pattern=["git", "status"], decision="allow")
+"#;
+    const MIGRATION_MARKER_FILENAME: &str = ".sandbox_migration";
+
+    let server = start_mock_server().await;
+    let mut migrated_builder = test_codex().with_config(|config| {
+        let policy_path = config.codex_home.join("rules/default.rules");
+        fs::create_dir_all(policy_path.parent().expect("rules directory"))
+            .expect("create rules directory");
+        fs::write(policy_path, LEGACY_POLICY).expect("write legacy policy");
+    });
+    let migrated = migrated_builder.build_with_auto_env(&server).await?;
+    let migrated_policy_path = migrated.codex_home_path().join("rules/default.rules");
+    assert_eq!(fs::read_to_string(&migrated_policy_path)?, MIGRATED_POLICY);
+    assert_eq!(
+        fs::read_to_string(migrated.codex_home_path().join(MIGRATION_MARKER_FILENAME))?,
+        "v1\n"
+    );
+
+    let mut ignored_builder = test_codex().with_config(|config| {
+        let policy_path = config.codex_home.join("rules/default.rules");
+        fs::create_dir_all(policy_path.parent().expect("rules directory"))
+            .expect("create rules directory");
+        fs::write(policy_path, LEGACY_POLICY).expect("write legacy policy");
+        config.config_layer_stack = config
+            .config_layer_stack
+            .clone()
+            .with_user_and_project_exec_policy_rules_ignored(
+                /*ignore_user_and_project_exec_policy_rules*/ true,
+            );
+    });
+    let ignored = ignored_builder.build_with_auto_env(&server).await?;
+    let ignored_policy_path = ignored.codex_home_path().join("rules/default.rules");
+    assert_eq!(fs::read_to_string(&ignored_policy_path)?, LEGACY_POLICY);
+    assert!(
+        !ignored
+            .codex_home_path()
+            .join(MIGRATION_MARKER_FILENAME)
+            .exists()
+    );
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -223,7 +271,7 @@ async fn granular_complex_forced_rm_requests_approval_when_allowed() -> Result<(
         .submit(Op::ExecApproval {
             id: approval.effective_approval_id(),
             turn_id: None,
-            decision: ReviewDecision::Denied,
+            decision: ReviewDecision::denied("rejected by user"),
         })
         .await?;
     wait_for_event(&test.codex, |event| {
@@ -353,30 +401,27 @@ async fn execpolicy_blocks_shell_invocation() -> Result<()> {
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, test.config.cwd.as_path());
     test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
                 text: "run shell command".into(),
                 text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
                 environments: Some(local_selections(test.config.cwd.clone())),
                 approval_policy: Some(AskForApproval::Never),
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
-                collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
-                    mode: codex_protocol::config_types::ModeKind::Default,
-                    settings: codex_protocol::config_types::Settings {
+                collaboration_mode: Some(CollaborationMode {
+                    mode: ModeKind::Default,
+                    settings: Settings {
                         model: session_model,
                         reasoning_effort: None,
                         developer_instructions: None,
                     },
                 }),
                 ..Default::default()
-            },
-        })
+            }),
+        )
         .await?;
 
     let EventMsg::ExecCommandEnd(end) = wait_for_event(&test.codex, |event| {

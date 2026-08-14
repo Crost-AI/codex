@@ -6,13 +6,15 @@ use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
 use tokio::process::Command;
 use tokio::time::timeout;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tracing::debug;
 use tracing::warn;
 
+use codex_http_client::HttpClientFactory;
+use codex_protocol::shell_environment::scrub_non_inheritable_env_vars;
 use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
+use codex_websocket_client::WebSocketConnector;
+use codex_websocket_client::WebSocketTlsMode;
 
 use crate::ExecServerClient;
 use crate::ExecServerError;
@@ -50,6 +52,7 @@ pub(crate) enum ExecServerReconnectStrategy {
         client_name: String,
         connect_timeout: Duration,
         initialize_timeout: Duration,
+        http_client_factory: HttpClientFactory,
     },
 }
 
@@ -71,6 +74,7 @@ impl ExecServerReconnectStrategy {
                 client_name,
                 connect_timeout,
                 initialize_timeout,
+                http_client_factory,
             } => {
                 let bundle = provider.connect_bundle(identity.public_key()).await?;
                 ExecServerClient::open_noise_rendezvous_connection(NoiseRendezvousConnectArgs {
@@ -80,6 +84,7 @@ impl ExecServerReconnectStrategy {
                     connect_timeout: *connect_timeout,
                     initialize_timeout: *initialize_timeout,
                     resume_session_id: Some(session_id.to_string()),
+                    http_client_factory: http_client_factory.clone(),
                 })
                 .await
             }
@@ -93,6 +98,7 @@ impl ExecServerClient {
     /// and authorization without replacing the harness identity.
     pub(crate) async fn connect_for_transport(
         transport_params: ExecServerTransportParams,
+        http_client_factory: HttpClientFactory,
     ) -> Result<Self, ExecServerError> {
         let (transport_params, deferred_readiness) = match transport_params {
             ExecServerTransportParams::Deferred(deferred) => {
@@ -101,15 +107,26 @@ impl ExecServerClient {
             transport_params => (transport_params, None),
         };
 
-        if let Some(readiness) = deferred_readiness {
-            readiness
+        if let Some(mut readiness) = deferred_readiness {
+            let provisioning_result = readiness
+                .wait_for(Option::is_some)
                 .await
-                .unwrap_or_else(|_| {
-                    Err("environment registration ended before completion".to_string())
-                })
-                .map_err(|message| {
-                    ExecServerError::Disconnected(format!("environment unavailable: {message}"))
+                .map_err(|_| {
+                    ExecServerError::Disconnected(
+                        "environment unavailable: environment provisioning ended before completion"
+                            .to_string(),
+                    )
+                })?
+                .clone()
+                .ok_or_else(|| {
+                    ExecServerError::Disconnected(
+                        "environment unavailable: provisioning remained pending after completion"
+                            .to_string(),
+                    )
                 })?;
+            provisioning_result.map_err(|message| {
+                ExecServerError::Disconnected(format!("environment unavailable: {message}"))
+            })?;
         }
 
         let (websocket_url, connect_timeout, initialize_timeout) = match transport_params {
@@ -130,9 +147,14 @@ impl ExecServerClient {
                     client_name: ENVIRONMENT_CLIENT_NAME.to_string(),
                     connect_timeout: DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
                     initialize_timeout: DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT,
+                    http_client_factory: http_client_factory.clone(),
                 };
-                let (connection, options) =
-                    Self::open_initial_noise_rendezvous_connection(&provider, &identity).await?;
+                let (connection, options) = Self::open_initial_noise_rendezvous_connection(
+                    &provider,
+                    &identity,
+                    http_client_factory,
+                )
+                .await?;
                 return Self::connect_with_recovery(connection, options, Some(reconnect_strategy))
                     .await;
             }
@@ -155,13 +177,16 @@ impl ExecServerClient {
             connect_timeout,
             initialize_timeout,
             resume_session_id: None,
+            http_client_factory,
         })
         .await
     }
 
+    #[tracing::instrument(name = "codex.exec_server.remote.noise.connect", skip_all)]
     async fn open_initial_noise_rendezvous_connection(
         provider: &Arc<dyn NoiseRendezvousConnectProvider>,
         identity: &NoiseChannelIdentity,
+        http_client_factory: HttpClientFactory,
     ) -> Result<(JsonRpcConnection, ExecServerClientConnectOptions), ExecServerError> {
         let open_connection = |bundle: NoiseRendezvousConnectBundle| {
             Self::open_noise_rendezvous_connection(NoiseRendezvousConnectArgs {
@@ -171,6 +196,7 @@ impl ExecServerClient {
                 connect_timeout: DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
                 initialize_timeout: DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT,
                 resume_session_id: None,
+                http_client_factory: http_client_factory.clone(),
             })
         };
         let bundle = provider.connect_bundle(identity.public_key()).await?;
@@ -212,16 +238,34 @@ impl ExecServerClient {
         ensure_rustls_crypto_provider();
         let websocket_url = args.websocket_url.clone();
         let connect_timeout = args.connect_timeout;
-        let (stream, _) = timeout(connect_timeout, connect_async(websocket_url.as_str()))
-            .await
-            .map_err(|_| ExecServerError::WebSocketConnectTimeout {
-                url: websocket_url.clone(),
-                timeout: connect_timeout,
-            })?
+        let request = websocket_url
+            .as_str()
+            .into_client_request()
             .map_err(|source| ExecServerError::WebSocketConnect {
                 url: websocket_url.clone(),
                 source,
             })?;
+        let connector = WebSocketConnector::new_with_tls_mode(
+            &args.http_client_factory,
+            WebSocketTlsMode::TungsteniteDefault,
+        )
+        .map_err(|error| ExecServerError::WebSocketConfiguration(error.to_string()))?;
+        let (stream, _) = timeout(
+            connect_timeout,
+            connector.connect(
+                request,
+                tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default(),
+            ),
+        )
+        .await
+        .map_err(|_| ExecServerError::WebSocketConnectTimeout {
+            url: websocket_url.clone(),
+            timeout: connect_timeout,
+        })?
+        .map_err(|source| ExecServerError::WebSocketConnect {
+            url: websocket_url.clone(),
+            source,
+        })?;
 
         let connection_label = format!("exec-server websocket {websocket_url}");
         let connection = if is_rendezvous_harness_url(&websocket_url) {
@@ -254,6 +298,16 @@ impl ExecServerClient {
         Self::connect(connection, options).await
     }
 
+    #[tracing::instrument(
+        name = "codex.exec_server.remote.noise.websocket_connect",
+        skip_all,
+        fields(
+            otel.kind = "client",
+            otel.name = "codex.exec_server.remote.noise.websocket_connect",
+            environment_id = %args.bundle.environment_id,
+            executor_registration_id = %args.bundle.executor_registration_id,
+        )
+    )]
     pub(crate) async fn open_noise_rendezvous_connection(
         args: NoiseRendezvousConnectArgs,
     ) -> Result<(JsonRpcConnection, ExecServerClientConnectOptions), ExecServerError> {
@@ -267,6 +321,7 @@ impl ExecServerClient {
             connect_timeout,
             initialize_timeout,
             resume_session_id,
+            http_client_factory,
         } = args;
         let NoiseRendezvousConnectBundle {
             websocket_url,
@@ -292,13 +347,13 @@ impl ExecServerClient {
             .extend(current_trace_context_headers());
         let (stream, _) = timeout(
             connect_timeout,
-            connect_async_with_config(
-                request,
-                Some(noise_relay_websocket_config()),
-                // Rendezvous sends small, latency-sensitive frames, so avoid Nagle's coalescing delay.
-                /*disable_nagle*/
-                true,
-            ),
+            WebSocketConnector::new_with_tls_mode(
+                &http_client_factory,
+                WebSocketTlsMode::TungsteniteDefault,
+            )
+            .map_err(|error| ExecServerError::WebSocketConfiguration(error.to_string()))?
+            .with_tcp_nodelay()
+            .connect(request, noise_relay_websocket_config()),
         )
         .await
         .map_err(|_| ExecServerError::WebSocketConnectTimeout {
@@ -387,6 +442,7 @@ fn stdio_command_process(stdio_command: &StdioExecServerCommand) -> Command {
     let mut command = Command::new(&stdio_command.program);
     command.args(&stdio_command.args);
     command.envs(&stdio_command.env);
+    scrub_non_inheritable_env_vars(command.as_std_mut());
     if let Some(cwd) = &stdio_command.cwd {
         command.current_dir(cwd);
     }

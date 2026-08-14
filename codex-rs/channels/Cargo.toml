@@ -1,0 +1,26 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "codex-channels"
+version.workspace = true
+
+[lib]
+name = "codex_channels"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+codex-rmcp-client = { workspace = true }
+codex-utils-cargo-bin = { workspace = true }
+futures = { workspace = true }
+pretty_assertions = { workspace = true }
+rmcp = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

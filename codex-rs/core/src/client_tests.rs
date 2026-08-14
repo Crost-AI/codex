@@ -104,7 +104,6 @@ fn test_model_client_with_thread_id(
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
-        /*item_ids_enabled*/ false,
         /*concurrent_reasoning_summaries_enabled*/ false,
         /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
@@ -150,7 +149,6 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
-        /*item_ids_enabled*/ false,
         /*concurrent_reasoning_summaries_enabled*/ false,
         /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
@@ -167,6 +165,7 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
         }],
         base_instructions: BaseInstructions {
             text: "base instructions".to_string(),
+            provenance: None,
         },
         ..Default::default()
     };
@@ -260,13 +259,11 @@ fn test_model_info() -> ModelInfo {
         "supported_in_api": true,
         "priority": 1,
         "upgrade": null,
-        "base_instructions": "base instructions",
         "model_messages": null,
         "support_verbosity": false,
         "default_verbosity": null,
         "apply_patch_tool_type": null,
         "truncation_policy": {"mode": "bytes", "limit": 10000},
-        "supports_parallel_tool_calls": false,
         "supports_image_detail_original": false,
         "context_window": 272000,
         "auto_compact_token_limit": null,
@@ -330,7 +327,7 @@ async fn chatgpt_auth_manager(
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::default(),
-        /*auth_route_config*/ None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     let auth = auth_manager.auth().await.expect("auth should load");
@@ -825,7 +822,6 @@ fn model_client_with_counting_attestation(
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
-        /*item_ids_enabled*/ false,
         /*concurrent_reasoning_summaries_enabled*/ false,
         Some(Arc::new(CountingAttestationProvider {
             calls: attestation_calls.clone(),

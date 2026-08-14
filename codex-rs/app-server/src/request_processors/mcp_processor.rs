@@ -1,5 +1,6 @@
 use super::*;
 use codex_core::McpManager;
+use codex_mcp::McpServerSource;
 
 const MCP_TOOL_THREAD_ID_META_KEY: &str = "threadId";
 
@@ -78,7 +79,7 @@ impl McpRequestProcessor {
         &self,
         _params: Option<()>,
     ) -> Result<McpServerRefreshResponse, JSONRPCErrorError> {
-        crate::mcp_refresh::queue_strict_refresh(&self.thread_manager, &self.config_manager)
+        crate::mcp_refresh::reload_mcp_config(&self.thread_manager, &self.config_manager)
             .await
             .map_err(|err| internal_error(format!("failed to refresh MCP servers: {err}")))?;
         Ok(McpServerRefreshResponse {})
@@ -117,16 +118,23 @@ impl McpRequestProcessor {
         let McpServerOauthLoginParams {
             name,
             thread_id,
+            client_registration,
             scopes,
             timeout_secs,
         } = params;
+        let client_registration = match client_registration.unwrap_or_default() {
+            McpServerOauthClientRegistration::Auto => McpOAuthClientRegistration::Auto,
+            McpServerOauthClientRegistration::Cimd => McpOAuthClientRegistration::Cimd,
+            McpServerOauthClientRegistration::Dcr => McpOAuthClientRegistration::Dcr,
+        };
 
         let auth = self.auth_manager.auth().await;
         let (mcp_config, runtime_context) = match thread_id.as_deref() {
             Some(thread_id) => {
                 let (_, thread) = self.load_thread(thread_id).await?;
-                let runtime = thread.current_mcp_runtime().await;
-                (runtime.config().clone(), runtime.runtime_context().clone())
+                let (config, runtime_context) =
+                    thread.current_mcp_config_and_runtime_context().await;
+                ((*config).clone(), runtime_context)
             }
             None => {
                 let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
@@ -143,14 +151,17 @@ impl McpRequestProcessor {
             }
         };
         let effective_servers = codex_mcp::effective_mcp_servers(&mcp_config, auth.as_ref());
-        let Some(server) = effective_servers
-            .get(&name)
-            .and_then(codex_mcp::EffectiveMcpServer::configured_config)
-        else {
+        let Some(server) = effective_servers.get(&name) else {
             return Err(invalid_request(format!(
                 "No MCP server named '{name}' found."
             )));
         };
+        let redirect_mode = if server.is_agent_plugin() {
+            StreamableHttpRedirectMode::AgentPluginV1
+        } else {
+            StreamableHttpRedirectMode::Legacy
+        };
+        let server = server.config();
 
         let (url, http_headers, env_http_headers) = match &server.transport {
             McpServerTransportConfig::StreamableHttp {
@@ -173,16 +184,22 @@ impl McpRequestProcessor {
             })?;
 
         let discovered_scopes = if scopes.is_none() && server.scopes.is_none() {
-            discover_supported_scopes_with_http_client(&server.transport, Arc::clone(&http_client))
-                .await
+            discover_supported_scopes(
+                &server.transport,
+                Arc::clone(&http_client),
+                codex_rmcp_client::OAuthDiscoveryTimeout::Requested,
+                redirect_mode,
+            )
+            .await
         } else {
             None
         };
         let resolved_scopes =
             resolve_oauth_scopes(scopes, server.scopes.clone(), discovered_scopes);
+        let oauth_credential_name = server.oauth_credential_name(&name);
 
-        let handle = perform_oauth_login_return_url_with_http_client(
-            &name,
+        let handle = perform_oauth_login_return_url(
+            oauth_credential_name.as_ref(),
             &url,
             mcp_config.mcp_oauth_credentials_store_mode,
             mcp_config.auth_keyring_backend_kind,
@@ -190,11 +207,13 @@ impl McpRequestProcessor {
             env_http_headers,
             &resolved_scopes.scopes,
             server.oauth_client_id(),
+            client_registration,
             server.oauth_resource.as_deref(),
             timeout_secs,
-            mcp_config.mcp_oauth_callback_port,
+            server.oauth_callback_port(mcp_config.mcp_oauth_callback_port),
             mcp_config.mcp_oauth_callback_url.as_deref(),
             http_client,
+            redirect_mode,
         )
         .await
         .map_err(|err| internal_error(format!("failed to login to MCP server '{name}': {err}")))?;
@@ -202,12 +221,16 @@ impl McpRequestProcessor {
         let notification_name = name.clone();
         let notification_thread_id = thread_id;
         let outgoing = Arc::clone(&self.outgoing);
+        let thread_manager = Arc::clone(&self.thread_manager);
 
         tokio::spawn(async move {
             let (success, error) = match handle.wait().await {
                 Ok(()) => (true, None),
                 Err(err) => (false, Some(err.to_string())),
             };
+            if success {
+                thread_manager.invalidate_mcp_runtimes().await;
+            }
 
             let notification = ServerNotification::McpServerOauthLoginCompleted(
                 McpServerOauthLoginCompletedNotification {
@@ -246,12 +269,9 @@ impl McpRequestProcessor {
         };
         let mcp_manager = self.thread_manager.mcp_manager();
         let auth = self.auth_manager.auth().await;
+        let config_layer_stack = config.config_layer_stack.clone();
         let (mcp_config, runtime_context) = match thread {
-            Some(thread) => {
-                let mcp_config = thread.runtime_mcp_config(&config).await;
-                let runtime = thread.current_mcp_runtime().await;
-                (mcp_config, runtime.runtime_context().clone())
-            }
+            Some(thread) => thread.runtime_mcp_config_and_context(&config).await,
             None => {
                 let mcp_config = mcp_manager.runtime_config(&config).await;
                 let runtime_context = McpRuntimeContext::new(
@@ -263,6 +283,8 @@ impl McpRequestProcessor {
         };
 
         tokio::spawn(async move {
+            let mut server_sources = codex_mcp::mcp_server_sources(&mcp_config);
+            refine_config_layer_sources(&mut server_sources, &config_layer_stack);
             Self::list_mcp_server_status_task(
                 outgoing,
                 request,
@@ -271,12 +293,14 @@ impl McpRequestProcessor {
                 auth,
                 runtime_context,
                 mcp_manager,
+                server_sources,
             )
             .await;
         });
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn list_mcp_server_status_task(
         outgoing: Arc<OutgoingMessageSender>,
         request_id: ConnectionRequestId,
@@ -285,6 +309,7 @@ impl McpRequestProcessor {
         auth: Option<CodexAuth>,
         runtime_context: McpRuntimeContext,
         mcp_manager: Arc<McpManager>,
+        server_sources: HashMap<String, codex_mcp::McpServerSourceInfo>,
     ) {
         let result = Self::list_mcp_server_status_response(
             request_id.request_id.to_string(),
@@ -293,11 +318,13 @@ impl McpRequestProcessor {
             auth,
             runtime_context,
             mcp_manager,
+            server_sources,
         )
         .await;
         outgoing.send_result(request_id, result).await;
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn list_mcp_server_status_response(
         request_id: String,
         params: ListMcpServerStatusParams,
@@ -305,6 +332,7 @@ impl McpRequestProcessor {
         auth: Option<CodexAuth>,
         runtime_context: McpRuntimeContext,
         mcp_manager: Arc<McpManager>,
+        server_sources: HashMap<String, codex_mcp::McpServerSourceInfo>,
     ) -> Result<ListMcpServerStatusResponse, JSONRPCErrorError> {
         let detail = match params.detail.unwrap_or(McpServerStatusDetail::Full) {
             McpServerStatusDetail::Full => McpSnapshotDetail::Full,
@@ -329,6 +357,7 @@ impl McpRequestProcessor {
             resource_templates,
             auth_statuses,
             mut server_names,
+            channel_capabilities,
         } = snapshot;
         server_names.extend(
             auth_statuses
@@ -363,6 +392,17 @@ impl McpRequestProcessor {
             .iter()
             .map(|name| McpServerStatus {
                 name: name.clone(),
+                plugin_id: mcp_config.mcp_server_catalog.server(name).and_then(
+                    |server| match server.source() {
+                        McpServerSource::Plugin(plugin)
+                        | McpServerSource::SelectedPlugin(plugin) => {
+                            Some(plugin.plugin_id().to_owned())
+                        }
+                        McpServerSource::Config
+                        | McpServerSource::Compatibility { .. }
+                        | McpServerSource::Extension { .. } => None,
+                    },
+                ),
                 server_info: server_infos.get(name).cloned(),
                 tools: tools_by_server.get(name).cloned().unwrap_or_default(),
                 resources: resources.get(name).cloned().unwrap_or_default(),
@@ -372,6 +412,12 @@ impl McpRequestProcessor {
                     .cloned()
                     .unwrap_or(CoreMcpAuthStatus::Unsupported)
                     .into(),
+                source: server_sources.get(name).map(|info| info.source.clone()),
+                overridden_sources: server_sources
+                    .get(name)
+                    .map(|info| info.overridden_sources.clone())
+                    .unwrap_or_default(),
+                declares_channel_capability: channel_capabilities.get(name).copied(),
             })
             .collect();
 
@@ -499,5 +545,58 @@ fn with_mcp_tool_call_thread_id_meta(
             Some(serde_json::Value::Object(map))
         }
         other => other,
+    }
+}
+
+/// Refines catalog-level "config.toml" sources with the config layer that
+/// actually defined `mcp_servers.<name>`, and records same-name definitions
+/// from lower-precedence layers as overridden.
+fn refine_config_layer_sources(
+    server_sources: &mut HashMap<String, codex_mcp::McpServerSourceInfo>,
+    config_layer_stack: &codex_config::ConfigLayerStack,
+) {
+    for (name, info) in server_sources.iter_mut() {
+        if info.source != "config.toml" {
+            continue;
+        }
+        let defining_layers: Vec<String> = config_layer_stack
+            .layers_high_to_low()
+            .into_iter()
+            .filter(|layer| !layer.is_disabled())
+            .filter(|layer| {
+                layer
+                    .config
+                    .get("mcp_servers")
+                    .and_then(|servers| servers.get(name))
+                    .is_some()
+            })
+            .map(|layer| config_layer_label(&layer.name))
+            .collect();
+        if let Some((winner, losers)) = defining_layers.split_first() {
+            info.source = winner.clone();
+            let mut overridden = losers.to_vec();
+            overridden.extend(std::mem::take(&mut info.overridden_sources));
+            info.overridden_sources = overridden;
+        }
+    }
+}
+
+fn config_layer_label(source: &codex_config::ConfigLayerSource) -> String {
+    match source {
+        codex_config::ConfigLayerSource::PackagedDefaults { .. } => "packaged defaults".to_string(),
+        codex_config::ConfigLayerSource::Mdm { .. } => "managed preferences (MDM)".to_string(),
+        codex_config::ConfigLayerSource::System { .. } => "system config".to_string(),
+        codex_config::ConfigLayerSource::EnterpriseManaged { .. } => {
+            "enterprise config".to_string()
+        }
+        codex_config::ConfigLayerSource::User { .. } => "config.toml (user)".to_string(),
+        codex_config::ConfigLayerSource::Project { .. } => "config.toml (project)".to_string(),
+        codex_config::ConfigLayerSource::SessionFlags => "session overrides".to_string(),
+        codex_config::ConfigLayerSource::LegacyManagedConfigTomlFromFile { .. } => {
+            "managed config".to_string()
+        }
+        codex_config::ConfigLayerSource::LegacyManagedConfigTomlFromMdm => {
+            "managed config (MDM)".to_string()
+        }
     }
 }

@@ -1,5 +1,11 @@
 use super::*;
 use crate::app_info::app_info_to_api;
+use codex_connectors::AppToolPolicyEvaluator;
+
+mod installed;
+mod read;
+
+pub(super) use read::APP_READ_MAX_IDS;
 
 pub(crate) struct AppsRequestProcessor {
     auth_manager: Arc<AuthManager>,
@@ -244,19 +250,24 @@ impl AppsRequestProcessor {
         let mut all_loaded = false;
         let mut codex_apps_ready = true;
         let mut last_notified_apps = None;
+        let mut sent_app_list_update = false;
+        let app_policy = AppToolPolicyEvaluator::new(&config.config_layer_stack);
 
         if accessible_connectors.is_some() || all_connectors.is_some() {
-            let merged = connectors::with_app_enabled_state(
-                merge_loaded_apps(all_connectors.as_deref(), accessible_connectors.as_deref()),
-                &config,
-            );
-            if should_send_app_list_updated_notification(
+            let merged = app_policy.apply_app_enabled_state(merge_loaded_apps(
+                all_connectors.as_deref(),
+                accessible_connectors.as_deref(),
+            ));
+            if !force_refetch {
+                last_notified_apps = Some(merged);
+            } else if should_send_app_list_updated_notification(
                 merged.as_slice(),
                 accessible_loaded,
                 all_loaded,
             ) {
                 send_app_list_updated_notification(outgoing, merged.clone()).await;
                 last_notified_apps = Some(merged);
+                sent_app_list_update = true;
             }
         }
 
@@ -305,18 +316,24 @@ impl AppsRequestProcessor {
                 } else {
                     accessible_connectors.as_deref()
                 };
-            let merged = connectors::with_app_enabled_state(
-                merge_loaded_apps(all_connectors_for_update, accessible_connectors_for_update),
-                &config,
-            );
+            let merged = app_policy.apply_app_enabled_state(merge_loaded_apps(
+                all_connectors_for_update,
+                accessible_connectors_for_update,
+            ));
             if should_send_app_list_updated_notification(
                 merged.as_slice(),
                 accessible_loaded,
                 all_loaded,
-            ) && last_notified_apps.as_ref() != Some(&merged)
+            ) && (last_notified_apps.as_ref() != Some(&merged)
+                || (!force_refetch
+                    && start == 0
+                    && accessible_loaded
+                    && all_loaded
+                    && !sent_app_list_update))
             {
                 send_app_list_updated_notification(outgoing, merged.clone()).await;
                 last_notified_apps = Some(merged.clone());
+                sent_app_list_update = true;
             }
 
             if accessible_loaded && all_loaded {
@@ -352,6 +369,18 @@ impl AppsRequestProcessor {
             .map_err(|err| internal_error(format!("failed to reload config: {err}")))
     }
 
+    async fn load_apps_config(&self, thread_id: Option<&str>) -> Result<Config, JSONRPCErrorError> {
+        let Some(thread_id) = thread_id else {
+            return self.load_latest_config(/*fallback_cwd*/ None).await;
+        };
+        let (_, thread) = self.load_thread(thread_id).await?;
+        let thread_config = thread.config().await;
+        self.config_manager
+            .load_latest_config_for_thread(thread_config.as_ref())
+            .await
+            .map_err(|err| internal_error(format!("failed to reload config: {err}")))
+    }
+
     async fn workspace_codex_plugins_enabled(
         &self,
         config: &Config,
@@ -376,7 +405,7 @@ impl AppsRequestProcessor {
 }
 
 const APP_LIST_LOAD_TIMEOUT: Duration = Duration::from_secs(90);
-// `app/list` is the legacy request-path baseline for the future `app/installed` endpoint;
+// `app/list` is the legacy request-path baseline for the `app/installed` endpoint;
 // `path=legacy` keeps it separate from the new snapshot-backed implementation in dashboards.
 const APPS_INSTALLED_DURATION_METRIC: &str = "codex.apps.installed.duration_ms";
 
@@ -390,7 +419,6 @@ fn record_legacy_apps_installed_duration(started_at: Instant, reload: bool) {
         );
     }
 }
-
 enum AppListLoadResult {
     Accessible(Result<AccessibleConnectorsStatus, String>),
     Directory(Result<Vec<AppInfo>, String>),

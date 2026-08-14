@@ -1,16 +1,12 @@
-use crate::guardian::GuardianApprovalRequest;
 use crate::guardian::GuardianNetworkAccessTrigger;
-use crate::guardian::guardian_rejection_message;
-use crate::guardian::guardian_timeout_message;
-use crate::guardian::new_guardian_review_id;
-use crate::guardian::review_approval_request;
-use crate::guardian::routes_approval_to_guardian;
-use crate::hook_runtime::run_permission_request_hooks;
+use crate::guardian::GuardianReviewContext;
 use crate::network_policy_decision::denied_network_policy_message;
 use crate::session::session::Session;
-use crate::tools::sandboxing::PermissionRequestPayload;
+use crate::session::turn_context::TurnEnvironment;
+use crate::tools::approvals::ApprovalAction;
+use crate::tools::approvals::ApprovalContext;
+use crate::tools::events::truncate_rejection_message;
 use crate::tools::sandboxing::ToolError;
-use codex_hooks::PermissionRequestDecision;
 use codex_network_proxy::BlockedRequest;
 use codex_network_proxy::BlockedRequestObserver;
 use codex_network_proxy::NetworkDecision;
@@ -27,19 +23,26 @@ use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::WarningEvent;
-use codex_sandboxing::SandboxType;
+use codex_sandboxing::record_network_sandbox_violation;
+use codex_tools::ToolName;
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
+use std::sync::Mutex as SyncMutex;
+use std::sync::OnceLock as SyncOnceLock;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::OnceCell;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+use tracing::error;
 use tracing::warn;
 use uuid::Uuid;
+
+const ABANDONED_NETWORK_APPROVAL_MESSAGE: &str =
+    "network approval was cancelled before a decision was returned";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NetworkApprovalMode {
@@ -54,13 +57,14 @@ pub(crate) struct NetworkApprovalSpec {
     pub trigger: GuardianNetworkAccessTrigger,
     pub command: String,
     pub environment_id: String,
+    pub permission_profile: PermissionProfile,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct DeferredNetworkApproval {
     registration_id: String,
     cancellation_token: CancellationToken,
-    finish_outcome: Arc<OnceCell<Option<NetworkApprovalOutcome>>>,
+    finish_outcome: Arc<OnceCell<Option<String>>>,
     _execution_proxy: Option<NetworkProxy>,
 }
 
@@ -83,6 +87,8 @@ impl DeferredNetworkApproval {
             .get_or_init(|| async { service.finish_call_outcome(&self.registration_id).await })
             .await
             .clone();
+        let outcome =
+            outcome.or_else(|| abandoned_network_approval_outcome(&self.cancellation_token));
         network_approval_outcome_to_result(outcome)
     }
 }
@@ -137,6 +143,13 @@ struct HostApprovalKey {
     port: u16,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct PendingHostApprovalKey {
+    host: HostApprovalKey,
+    turn_id: String,
+    execution_id: Option<String>,
+}
+
 impl HostApprovalKey {
     fn from_request(
         request: &NetworkPolicyRequest,
@@ -168,22 +181,17 @@ enum PendingApprovalDecision {
     Deny,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum NetworkApprovalOutcome {
-    DeniedByUser,
-    DeniedByPolicy(String),
-}
-
-fn network_approval_outcome_to_result(
-    outcome: Option<NetworkApprovalOutcome>,
-) -> Result<(), ToolError> {
+fn network_approval_outcome_to_result(outcome: Option<String>) -> Result<(), ToolError> {
     match outcome {
-        Some(NetworkApprovalOutcome::DeniedByUser) => {
-            Err(ToolError::Rejected("rejected by user".to_string()))
-        }
-        Some(NetworkApprovalOutcome::DeniedByPolicy(message)) => Err(ToolError::Rejected(message)),
+        Some(rejection) => Err(ToolError::Rejected(truncate_rejection_message(&rejection))),
         None => Ok(()),
     }
+}
+
+fn abandoned_network_approval_outcome(cancellation_token: &CancellationToken) -> Option<String> {
+    cancellation_token
+        .is_cancelled()
+        .then(|| ABANDONED_NETWORK_APPROVAL_MESSAGE.to_string())
 }
 
 /// Whether an allowlist miss may be reviewed instead of hard-denied.
@@ -205,14 +213,14 @@ impl PendingApprovalDecision {
 }
 
 struct PendingHostApproval {
-    decision: Mutex<Option<PendingApprovalDecision>>,
+    decision: SyncOnceLock<PendingApprovalDecision>,
     notify: Notify,
 }
 
 impl PendingHostApproval {
     fn new() -> Self {
         Self {
-            decision: Mutex::new(None),
+            decision: SyncOnceLock::new(),
             notify: Notify::new(),
         }
     }
@@ -220,19 +228,17 @@ impl PendingHostApproval {
     async fn wait_for_decision(&self) -> PendingApprovalDecision {
         loop {
             let notified = self.notify.notified();
-            if let Some(decision) = *self.decision.lock().await {
-                return decision;
+            if let Some(decision) = self.decision.get() {
+                return *decision;
             }
             notified.await;
         }
     }
 
-    async fn set_decision(&self, decision: PendingApprovalDecision) {
-        {
-            let mut current = self.decision.lock().await;
-            *current = Some(decision);
+    fn set_decision(&self, decision: PendingApprovalDecision) {
+        if self.decision.set(decision).is_ok() {
+            self.notify.notify_waiters();
         }
-        self.notify.notify_waiters();
     }
 }
 
@@ -242,6 +248,7 @@ struct ActiveNetworkApprovalCall {
     trigger: GuardianNetworkAccessTrigger,
     command: String,
     environment_id: String,
+    permission_profile: PermissionProfile,
     cancellation_token: CancellationToken,
 }
 
@@ -259,21 +266,101 @@ struct NetworkRequestAttribution {
 #[derive(Default)]
 struct NetworkApprovalCallState {
     active_calls: IndexMap<String, Arc<ActiveNetworkApprovalCall>>,
-    call_outcomes: HashMap<String, NetworkApprovalOutcome>,
+    call_outcomes: HashMap<String, String>,
 }
 
 pub(crate) struct NetworkApprovalService {
     calls: Mutex<NetworkApprovalCallState>,
-    pending_host_approvals: Mutex<HashMap<HostApprovalKey, Arc<PendingHostApproval>>>,
+    // Owner cleanup runs from Drop, so this lock cannot require an async task.
+    pending_host_approvals: SyncMutex<HashMap<PendingHostApprovalKey, Arc<PendingHostApproval>>>,
+    // Keep persisted session policy and the in-memory approval caches in the same order.
+    session_policy_commit_lock: Mutex<()>,
     session_approved_hosts: Mutex<HashSet<HostApprovalKey>>,
     session_denied_hosts: Mutex<HashSet<HostApprovalKey>>,
+}
+
+/// Removes and resolves the exact pending generation created by one request.
+///
+/// Dropping an unfinished owner fails its existing waiters closed without
+/// deleting a newer same-host request.
+struct PendingHostApprovalOwner<'a> {
+    service: &'a NetworkApprovalService,
+    key: PendingHostApprovalKey,
+    pending: Arc<PendingHostApproval>,
+    execution_cancellation: Option<CancellationToken>,
+    decision_on_drop: PendingApprovalDecision,
+    completed: bool,
+}
+
+impl<'a> PendingHostApprovalOwner<'a> {
+    fn new(
+        service: &'a NetworkApprovalService,
+        key: PendingHostApprovalKey,
+        pending: Arc<PendingHostApproval>,
+        execution_cancellation: Option<CancellationToken>,
+    ) -> Self {
+        Self {
+            service,
+            key,
+            pending,
+            execution_cancellation,
+            decision_on_drop: PendingApprovalDecision::Deny,
+            completed: false,
+        }
+    }
+
+    fn set_decision_on_drop(&mut self, decision: PendingApprovalDecision) {
+        self.decision_on_drop = decision;
+    }
+
+    fn complete(mut self, decision: PendingApprovalDecision) {
+        self.cancel_execution_if_denied(decision);
+        self.publish_and_remove(decision);
+        self.completed = true;
+    }
+
+    fn cancel_execution_if_denied(&self, decision: PendingApprovalDecision) {
+        if matches!(decision, PendingApprovalDecision::Deny)
+            && let Some(execution_cancellation) = &self.execution_cancellation
+        {
+            execution_cancellation.cancel();
+        }
+    }
+
+    fn publish_and_remove(&self, decision: PendingApprovalDecision) {
+        // Remove this generation before waking its waiters so a concurrent retry
+        // cannot attach to an already-completed approval.
+        let mut approvals = self
+            .service
+            .pending_host_approvals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if approvals
+            .get(&self.key)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.pending))
+        {
+            approvals.remove(&self.key);
+        }
+        drop(approvals);
+        self.pending.set_decision(decision);
+    }
+}
+
+impl Drop for PendingHostApprovalOwner<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.cancel_execution_if_denied(self.decision_on_drop);
+            self.publish_and_remove(self.decision_on_drop);
+        }
+    }
 }
 
 impl Default for NetworkApprovalService {
     fn default() -> Self {
         Self {
             calls: Mutex::new(NetworkApprovalCallState::default()),
-            pending_host_approvals: Mutex::new(HashMap::new()),
+            pending_host_approvals: SyncMutex::new(HashMap::new()),
+            session_policy_commit_lock: Mutex::new(()),
             session_approved_hosts: Mutex::new(HashSet::new()),
             session_denied_hosts: Mutex::new(HashSet::new()),
         }
@@ -283,35 +370,23 @@ impl Default for NetworkApprovalService {
 impl NetworkApprovalService {
     /// Replace the target session's approval cache with the source session's
     /// currently approved hosts.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "the approval snapshot must not interleave with a session policy commit"
+    )]
     pub(crate) async fn sync_session_approved_hosts_to(&self, other: &Self) {
+        let _commit_guard = self.session_policy_commit_lock.lock().await;
         let approved_hosts = self.session_approved_hosts.lock().await.clone();
         let mut other_approved_hosts = other.session_approved_hosts.lock().await;
         other_approved_hosts.clear();
         other_approved_hosts.extend(approved_hosts.iter().cloned());
     }
 
-    async fn register_call(
-        &self,
-        registration_id: String,
-        turn_id: String,
-        trigger: GuardianNetworkAccessTrigger,
-        command: String,
-        environment_id: String,
-        cancellation_token: CancellationToken,
-    ) {
+    async fn register_call(&self, call: ActiveNetworkApprovalCall) {
         let mut calls = self.calls.lock().await;
-        let key = registration_id.clone();
-        calls.active_calls.insert(
-            key,
-            Arc::new(ActiveNetworkApprovalCall {
-                registration_id,
-                turn_id,
-                trigger,
-                command,
-                environment_id,
-                cancellation_token,
-            }),
-        );
+        calls
+            .active_calls
+            .insert(call.registration_id.clone(), Arc::new(call));
     }
 
     pub(crate) async fn unregister_call(&self, registration_id: &str) {
@@ -401,11 +476,14 @@ impl NetworkApprovalService {
         }
     }
 
-    async fn get_or_create_pending_approval(
+    fn get_or_create_pending_approval(
         &self,
-        key: HostApprovalKey,
+        key: PendingHostApprovalKey,
     ) -> (Arc<PendingHostApproval>, bool) {
-        let mut pending = self.pending_host_approvals.lock().await;
+        let mut pending = self
+            .pending_host_approvals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(existing) = pending.get(&key).cloned() {
             return (existing, false);
         }
@@ -416,22 +494,17 @@ impl NetworkApprovalService {
     }
 
     #[cfg(test)]
-    async fn take_call_outcome(&self, registration_id: &str) -> Option<NetworkApprovalOutcome> {
+    async fn take_call_outcome(&self, registration_id: &str) -> Option<String> {
         let mut calls = self.calls.lock().await;
         calls.call_outcomes.remove(registration_id)
     }
 
-    async fn record_call_outcome(&self, registration_id: &str, outcome: NetworkApprovalOutcome) {
+    async fn record_call_outcome(&self, registration_id: &str, outcome: String) {
         let mut calls = self.calls.lock().await;
         let Some(call) = calls.active_calls.get(registration_id).cloned() else {
             return;
         };
-        if matches!(
-            calls.call_outcomes.get(registration_id),
-            Some(NetworkApprovalOutcome::DeniedByUser)
-        ) {
-            return;
-        }
+        // Explicit network-review outcomes replace generic blocked-request fallbacks.
         calls
             .call_outcomes
             .insert(registration_id.to_string(), outcome);
@@ -440,18 +513,26 @@ impl NetworkApprovalService {
         call.cancellation_token.cancel();
     }
 
-    async fn remove_call(&self, registration_id: &str) -> Option<NetworkApprovalOutcome> {
+    async fn remove_call(&self, registration_id: &str) -> Option<String> {
         let mut calls = self.calls.lock().await;
         calls.active_calls.shift_remove(registration_id);
         calls.call_outcomes.remove(registration_id)
     }
 
-    async fn finish_call_outcome(&self, registration_id: &str) -> Option<NetworkApprovalOutcome> {
+    async fn finish_call_outcome(&self, registration_id: &str) -> Option<String> {
         self.remove_call(registration_id).await
     }
 
-    async fn finish_call(&self, registration_id: &str) -> Result<(), ToolError> {
-        network_approval_outcome_to_result(self.finish_call_outcome(registration_id).await)
+    async fn finish_call(
+        &self,
+        registration_id: &str,
+        cancellation_token: &CancellationToken,
+    ) -> Result<(), ToolError> {
+        let outcome = self
+            .finish_call_outcome(registration_id)
+            .await
+            .or_else(|| abandoned_network_approval_outcome(cancellation_token));
+        network_approval_outcome_to_result(outcome)
     }
 
     pub(crate) async fn record_blocked_request(&self, blocked: BlockedRequest) {
@@ -475,23 +556,12 @@ impl NetworkApprovalService {
         {
             return;
         }
-        calls.call_outcomes.insert(
-            owner_call.registration_id.clone(),
-            NetworkApprovalOutcome::DeniedByPolicy(message),
-        );
+        calls
+            .call_outcomes
+            .insert(owner_call.registration_id.clone(), message);
 
         drop(calls);
         owner_call.cancellation_token.cancel();
-    }
-
-    async fn active_turn_context(
-        session: &Session,
-    ) -> Option<Arc<crate::session::turn_context::TurnContext>> {
-        let active_turn = session.active_turn.lock().await;
-        active_turn
-            .as_ref()
-            .and_then(|turn| turn.task.as_ref())
-            .map(|task| Arc::clone(&task.turn_context))
     }
 
     fn format_network_target(protocol: &str, host: &str, port: u16) -> String {
@@ -505,6 +575,10 @@ impl NetworkApprovalService {
         )
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "persisted session policy and its in-memory caches must commit atomically"
+    )]
     pub(crate) async fn handle_inline_policy_request(
         &self,
         session: Arc<Session>,
@@ -525,34 +599,30 @@ impl NetworkApprovalService {
         else {
             return NetworkDecision::deny(REASON_NOT_ALLOWED);
         };
-        let turn_context = Self::active_turn_context(session.as_ref()).await;
+        let active_turn = session.active_turn_context_and_strict_auto_review().await;
         let Some(environment_id) = active_environment_id.or_else(|| {
-            turn_context
+            active_turn
                 .as_ref()
-                .and_then(|turn_context| turn_context.environments.primary())
-                .map(|environment| environment.environment_id.clone())
+                .and_then(|(turn_context, _)| turn_context.environments.primary())
+                .map(|environment| environment.selection.environment_id.clone())
         }) else {
             return NetworkDecision::deny(REASON_NOT_ALLOWED);
         };
         let key = HostApprovalKey::from_request(&request, protocol, environment_id.clone());
 
         {
-            let denied_hosts = self.session_denied_hosts.lock().await;
-            if denied_hosts.contains(&key) {
-                return NetworkDecision::deny(REASON_NOT_ALLOWED);
+            let _commit_guard = self.session_policy_commit_lock.lock().await;
+            {
+                let denied_hosts = self.session_denied_hosts.lock().await;
+                if denied_hosts.contains(&key) {
+                    return NetworkDecision::deny(REASON_NOT_ALLOWED);
+                }
             }
-        }
 
-        {
             let approved_hosts = self.session_approved_hosts.lock().await;
             if approved_hosts.contains(&key) {
                 return NetworkDecision::Allow;
             }
-        }
-
-        let (pending, is_owner) = self.get_or_create_pending_approval(key.clone()).await;
-        if !is_owner {
-            return pending.wait_for_decision().await.to_network_decision();
         }
 
         let target = Self::format_network_target(key.protocol, request.host.as_str(), key.port);
@@ -560,40 +630,59 @@ impl NetworkApprovalService {
             format!("Network access to \"{target}\" was blocked by policy.");
         let prompt_reason = format!("{} is not in the allowed_domains", request.host);
 
-        let Some(turn_context) = turn_context else {
-            pending.set_decision(PendingApprovalDecision::Deny).await;
-            self.pending_host_approvals.lock().await.remove(&key);
+        let Some((turn_context, strict_auto_review)) = active_turn else {
             if let Some(owner_call) = owner_call.as_ref() {
-                self.record_call_outcome(
-                    &owner_call.registration_id,
-                    NetworkApprovalOutcome::DeniedByPolicy(policy_denial_message),
-                )
-                .await;
+                self.record_call_outcome(&owner_call.registration_id, policy_denial_message)
+                    .await;
             }
             return NetworkDecision::deny(REASON_NOT_ALLOWED);
         };
-        if !permission_profile_allows_network_approval_flow(&turn_context.permission_profile()) {
-            pending.set_decision(PendingApprovalDecision::Deny).await;
-            self.pending_host_approvals.lock().await.remove(&key);
+        let pending_key = PendingHostApprovalKey {
+            host: key.clone(),
+            turn_id: owner_call
+                .as_ref()
+                .map_or_else(|| turn_context.sub_id.clone(), |call| call.turn_id.clone()),
+            execution_id: owner_call
+                .as_ref()
+                .map(|owner_call| owner_call.registration_id.clone()),
+        };
+        let (pending, is_owner) = self.get_or_create_pending_approval(pending_key.clone());
+        if !is_owner {
+            return pending.wait_for_decision().await.to_network_decision();
+        }
+        let mut pending_owner = PendingHostApprovalOwner::new(
+            self,
+            pending_key,
+            Arc::clone(&pending),
+            owner_call
+                .as_ref()
+                .map(|call| call.cancellation_token.clone()),
+        );
+
+        let permission_profile = owner_call
+            .as_ref()
+            .map(|call| &call.permission_profile)
+            .or_else(|| {
+                turn_context
+                    .environments
+                    .turn_environments()
+                    .find(|environment| environment.selection.environment_id == environment_id)
+                    .map(TurnEnvironment::permission_profile)
+            });
+        if !permission_profile.is_some_and(permission_profile_allows_network_approval_flow) {
             if let Some(owner_call) = owner_call.as_ref() {
-                self.record_call_outcome(
-                    &owner_call.registration_id,
-                    NetworkApprovalOutcome::DeniedByPolicy(policy_denial_message),
-                )
-                .await;
+                self.record_call_outcome(&owner_call.registration_id, policy_denial_message)
+                    .await;
             }
+            pending_owner.complete(PendingApprovalDecision::Deny);
             return NetworkDecision::deny(REASON_NOT_ALLOWED);
         }
-        if !allows_network_approval_flow(turn_context.approval_policy.value()) {
-            pending.set_decision(PendingApprovalDecision::Deny).await;
-            self.pending_host_approvals.lock().await.remove(&key);
+        if !allows_network_approval_flow(turn_context.approval_policy()) {
             if let Some(owner_call) = owner_call.as_ref() {
-                self.record_call_outcome(
-                    &owner_call.registration_id,
-                    NetworkApprovalOutcome::DeniedByPolicy(policy_denial_message),
-                )
-                .await;
+                self.record_call_outcome(&owner_call.registration_id, policy_denial_message)
+                    .await;
             }
+            pending_owner.complete(PendingApprovalDecision::Deny);
             return NetworkDecision::deny(REASON_NOT_ALLOWED);
         }
 
@@ -602,102 +691,150 @@ impl NetworkApprovalService {
             protocol,
         };
         let guardian_approval_id = Self::approval_id_for_key(&key);
+        let hook_run_id_suffix = owner_call.as_ref().map_or_else(
+            || guardian_approval_id.clone(),
+            |call| format!("{guardian_approval_id}#{}", call.registration_id),
+        );
         let prompt_command = vec!["network-access".to_string(), target.clone()];
         let command = owner_call
             .as_ref()
             .map_or_else(|| prompt_command.join(" "), |call| call.command.clone());
-        if let Some(permission_request_decision) = run_permission_request_hooks(
-            &session,
-            &turn_context,
-            &guardian_approval_id,
-            PermissionRequestPayload::bash(command, Some(format!("network-access {target}"))),
-        )
-        .await
-        {
-            match permission_request_decision {
-                PermissionRequestDecision::Allow => {
-                    pending
-                        .set_decision(PendingApprovalDecision::AllowOnce)
+        let cwd = if let Some(owner_call) = owner_call.as_ref() {
+            owner_call.trigger.cwd.clone()
+        } else {
+            turn_context
+                .environments
+                .turn_environments()
+                .find(|environment| environment.selection.environment_id == environment_id)
+                .and_then(|environment| environment.cwd().to_abs_path().ok())
+                .unwrap_or_else(|| {
+                    #[allow(deprecated)]
+                    turn_context.cwd.clone()
+                })
+        };
+        let approval_call_id = format!("{guardian_approval_id}#{}", Uuid::new_v4());
+        let telemetry_call_id = owner_call.as_ref().map_or_else(
+            || Uuid::new_v4().to_string(),
+            |call| call.trigger.call_id.clone(),
+        );
+        let telemetry_tool_name = owner_call.as_ref().map_or_else(
+            || "network_access".to_string(),
+            |call| call.trigger.tool_name.clone(),
+        );
+        let action = ApprovalAction::NetworkAccess {
+            id: guardian_approval_id,
+            turn_id: turn_context.sub_id.clone(),
+            environment_id,
+            target,
+            host: request.host.clone(),
+            protocol,
+            port: key.port,
+            trigger: owner_call.as_ref().map(|call| call.trigger.clone()),
+            hook_command: command,
+            hook_run_id: hook_run_id_suffix,
+            command: prompt_command,
+            cwd,
+        };
+        let approval_context = ApprovalContext {
+            review_context: GuardianReviewContext::from(&turn_context),
+            call_id: approval_call_id,
+            tool_name: ToolName::plain(telemetry_tool_name.clone()),
+            strict_auto_review,
+            approval_reason: Some(prompt_reason),
+            retry_reason: Some(policy_denial_message.clone()),
+            network_approval_context: Some(network_approval_context.clone()),
+        };
+        let approval_decision = match session.request_approval(action, approval_context).await {
+            Ok(decision) => decision,
+            Err(ToolError::Rejected(rejection)) => {
+                if let Some(owner_call) = owner_call.as_ref() {
+                    self.record_call_outcome(&owner_call.registration_id, rejection)
                         .await;
-                    let mut pending_approvals = self.pending_host_approvals.lock().await;
-                    pending_approvals.remove(&key);
-                    return NetworkDecision::Allow;
                 }
-                PermissionRequestDecision::Deny { message } => {
+                turn_context.session_telemetry.tool_decision(
+                    &telemetry_tool_name,
+                    &telemetry_call_id,
+                    &ReviewDecision::denied("network approval was rejected"),
+                    /*source*/ None,
+                );
+                pending_owner.complete(PendingApprovalDecision::Deny);
+                return NetworkDecision::deny(REASON_NOT_ALLOWED);
+            }
+            Err(ToolError::Codex(err)) => {
+                let telemetry_decision = if matches!(
+                    err.details(),
+                    codex_protocol::error::CodexErrorDetails::TurnAborted
+                ) {
+                    ReviewDecision::Abort
+                } else {
+                    ReviewDecision::denied("network approval failed")
+                };
+                if let Some(owner_call) = owner_call.as_ref() {
+                    let rejection = if matches!(
+                        err.details(),
+                        codex_protocol::error::CodexErrorDetails::TurnAborted
+                    ) {
+                        "rejected by user".to_string()
+                    } else {
+                        format!("Error while requesting approval: {err}")
+                    };
+                    self.record_call_outcome(&owner_call.registration_id, rejection)
+                        .await;
+                }
+                turn_context.session_telemetry.tool_decision(
+                    &telemetry_tool_name,
+                    &telemetry_call_id,
+                    &telemetry_decision,
+                    /*source*/ None,
+                );
+                pending_owner.complete(PendingApprovalDecision::Deny);
+                return NetworkDecision::deny(REASON_NOT_ALLOWED);
+            }
+        };
+
+        let _session_policy_commit_guard = if matches!(
+            &approval_decision,
+            ReviewDecision::Approved
+                | ReviewDecision::ApprovedExecpolicyAmendment { .. }
+                | ReviewDecision::ApprovedForSession
+                | ReviewDecision::NetworkPolicyAmendment { .. }
+        ) {
+            Some(self.session_policy_commit_lock.lock().await)
+        } else {
+            None
+        };
+        let mut telemetry_decision = approval_decision.clone();
+        let mut network_policy_amendment_applied = false;
+        let resolved = match approval_decision {
+            ReviewDecision::Approved | ReviewDecision::ApprovedExecpolicyAmendment { .. } => {
+                if self.session_denied_hosts.lock().await.contains(&key) {
                     if let Some(owner_call) = owner_call.as_ref() {
                         self.record_call_outcome(
                             &owner_call.registration_id,
-                            NetworkApprovalOutcome::DeniedByPolicy(message),
+                            policy_denial_message.clone(),
                         )
                         .await;
                     }
-                    pending.set_decision(PendingApprovalDecision::Deny).await;
-                    let mut pending_approvals = self.pending_host_approvals.lock().await;
-                    pending_approvals.remove(&key);
-                    return NetworkDecision::deny(REASON_NOT_ALLOWED);
+                    PendingApprovalDecision::Deny
+                } else {
+                    PendingApprovalDecision::AllowOnce
                 }
             }
-        }
-        let use_guardian = routes_approval_to_guardian(&turn_context);
-        let guardian_review_id = use_guardian.then(new_guardian_review_id);
-        let approval_decision = if let Some(review_id) = guardian_review_id.clone() {
-            review_approval_request(
-                &session,
-                &turn_context,
-                review_id,
-                GuardianApprovalRequest::NetworkAccess {
-                    id: guardian_approval_id.clone(),
-                    turn_id: owner_call
-                        .as_ref()
-                        .map_or_else(|| turn_context.sub_id.clone(), |call| call.turn_id.clone()),
-                    target,
-                    host: request.host,
-                    protocol,
-                    port: key.port,
-                    trigger: owner_call.as_ref().map(|call| call.trigger.clone()),
-                },
-                Some(policy_denial_message.clone()),
-            )
-            .await
-        } else {
-            let available_decisions = None;
-            let cwd = if let Some(owner_call) = owner_call.as_ref() {
-                owner_call.trigger.cwd.clone()
-            } else {
-                turn_context
-                    .environments
-                    .turn_environments
-                    .iter()
-                    .find(|environment| environment.environment_id == environment_id)
-                    .and_then(|environment| environment.cwd().to_abs_path().ok())
-                    .unwrap_or_else(|| {
-                        #[allow(deprecated)]
-                        turn_context.cwd.clone()
-                    })
-            };
-            session
-                .request_command_approval(
-                    turn_context.as_ref(),
-                    guardian_approval_id,
-                    /*approval_id*/ None,
-                    Some(environment_id),
-                    prompt_command,
-                    cwd,
-                    Some(prompt_reason),
-                    Some(network_approval_context.clone()),
-                    /*proposed_execpolicy_amendment*/ None,
-                    /*additional_permissions*/ None,
-                    available_decisions,
-                )
-                .await
-        };
-
-        let mut cache_session_deny = false;
-        let resolved = match approval_decision {
-            ReviewDecision::Approved | ReviewDecision::ApprovedExecpolicyAmendment { .. } => {
-                PendingApprovalDecision::AllowOnce
+            ReviewDecision::ApprovedForSession => {
+                if self.session_denied_hosts.lock().await.contains(&key) {
+                    if let Some(owner_call) = owner_call.as_ref() {
+                        self.record_call_outcome(
+                            &owner_call.registration_id,
+                            policy_denial_message.clone(),
+                        )
+                        .await;
+                    }
+                    PendingApprovalDecision::Deny
+                } else {
+                    self.session_approved_hosts.lock().await.insert(key.clone());
+                    PendingApprovalDecision::AllowForSession
+                }
             }
-            ReviewDecision::ApprovedForSession => PendingApprovalDecision::AllowForSession,
             ReviewDecision::NetworkPolicyAmendment {
                 network_policy_amendment,
             } => match network_policy_amendment.action {
@@ -706,10 +843,15 @@ impl NetworkApprovalService {
                         .persist_network_policy_amendment(
                             &network_policy_amendment,
                             &network_approval_context,
+                            || {
+                                pending_owner
+                                    .set_decision_on_drop(PendingApprovalDecision::AllowForSession);
+                            },
                         )
                         .await
                     {
                         Ok(()) => {
+                            network_policy_amendment_applied = true;
                             session
                                 .record_network_policy_amendment_message(
                                     &turn_context.sub_id,
@@ -729,17 +871,37 @@ impl NetworkApprovalService {
                                 .await;
                         }
                     }
-                    PendingApprovalDecision::AllowForSession
+                    if pending_owner.decision_on_drop == PendingApprovalDecision::AllowForSession {
+                        {
+                            let mut denied_hosts = self.session_denied_hosts.lock().await;
+                            denied_hosts.remove(&key);
+                        }
+                        self.session_approved_hosts.lock().await.insert(key.clone());
+                        PendingApprovalDecision::AllowForSession
+                    } else {
+                        if let Some(owner_call) = owner_call.as_ref() {
+                            self.record_call_outcome(
+                                &owner_call.registration_id,
+                                policy_denial_message.clone(),
+                            )
+                            .await;
+                        }
+                        PendingApprovalDecision::Deny
+                    }
                 }
                 NetworkPolicyRuleAction::Deny => {
                     match session
                         .persist_network_policy_amendment(
                             &network_policy_amendment,
                             &network_approval_context,
+                            || {
+                                pending_owner.set_decision_on_drop(PendingApprovalDecision::Deny);
+                            },
                         )
                         .await
                     {
                         Ok(()) => {
+                            network_policy_amendment_applied = true;
                             session
                                 .record_network_policy_amendment_message(
                                     &turn_context.sub_id,
@@ -762,66 +924,59 @@ impl NetworkApprovalService {
                     if let Some(owner_call) = owner_call.as_ref() {
                         self.record_call_outcome(
                             &owner_call.registration_id,
-                            NetworkApprovalOutcome::DeniedByUser,
+                            "rejected by user".to_string(),
                         )
                         .await;
                     }
-                    cache_session_deny = true;
+                    {
+                        let mut approved_hosts = self.session_approved_hosts.lock().await;
+                        approved_hosts.remove(&key);
+                    }
+                    self.session_denied_hosts.lock().await.insert(key.clone());
                     PendingApprovalDecision::Deny
                 }
             },
-            ReviewDecision::Denied | ReviewDecision::Abort => {
-                if let Some(review_id) = guardian_review_id.as_deref() {
-                    if let Some(owner_call) = owner_call.as_ref() {
-                        let message = guardian_rejection_message(session.as_ref(), review_id).await;
-                        self.record_call_outcome(
-                            &owner_call.registration_id,
-                            NetworkApprovalOutcome::DeniedByPolicy(message),
-                        )
-                        .await;
-                    }
-                } else if let Some(owner_call) = owner_call.as_ref() {
-                    self.record_call_outcome(
-                        &owner_call.registration_id,
-                        NetworkApprovalOutcome::DeniedByUser,
-                    )
-                    .await;
-                }
-                PendingApprovalDecision::Deny
-            }
-            ReviewDecision::TimedOut => {
+            ReviewDecision::ApprovedMcpPolicyAmendment
+            | ReviewDecision::Denied { .. }
+            | ReviewDecision::TimedOut
+            | ReviewDecision::Abort => {
+                error!("centralized network approval returned an invalid decision");
                 if let Some(owner_call) = owner_call.as_ref() {
                     self.record_call_outcome(
                         &owner_call.registration_id,
-                        NetworkApprovalOutcome::DeniedByPolicy(guardian_timeout_message()),
+                        "Error while requesting approval".to_string(),
                     )
                     .await;
                 }
                 PendingApprovalDecision::Deny
             }
         };
+        pending_owner.set_decision_on_drop(resolved);
 
-        if matches!(resolved, PendingApprovalDecision::AllowForSession) {
-            {
-                let mut denied_hosts = self.session_denied_hosts.lock().await;
-                denied_hosts.remove(&key);
-            }
-            let mut approved_hosts = self.session_approved_hosts.lock().await;
-            approved_hosts.insert(key.clone());
+        let decision_was_network_policy_amendment = matches!(
+            &telemetry_decision,
+            ReviewDecision::NetworkPolicyAmendment { .. }
+        );
+        if decision_was_network_policy_amendment && !network_policy_amendment_applied {
+            telemetry_decision = match resolved {
+                PendingApprovalDecision::AllowOnce => ReviewDecision::Approved,
+                PendingApprovalDecision::AllowForSession => ReviewDecision::ApprovedForSession,
+                PendingApprovalDecision::Deny => {
+                    ReviewDecision::denied("network approval was not applied")
+                }
+            };
+        } else if matches!(resolved, PendingApprovalDecision::Deny)
+            && !decision_was_network_policy_amendment
+        {
+            telemetry_decision = ReviewDecision::denied("network approval was not applied");
         }
-
-        if cache_session_deny {
-            {
-                let mut approved_hosts = self.session_approved_hosts.lock().await;
-                approved_hosts.remove(&key);
-            }
-            let mut denied_hosts = self.session_denied_hosts.lock().await;
-            denied_hosts.insert(key.clone());
-        }
-
-        pending.set_decision(resolved).await;
-        let mut pending_approvals = self.pending_host_approvals.lock().await;
-        pending_approvals.remove(&key);
+        turn_context.session_telemetry.tool_decision(
+            &telemetry_tool_name,
+            &telemetry_call_id,
+            &telemetry_decision,
+            /*source*/ None,
+        );
+        pending_owner.complete(resolved);
 
         resolved.to_network_decision()
     }
@@ -833,6 +988,7 @@ pub(crate) fn build_blocked_request_observer(
     Arc::new(move |blocked: BlockedRequest| {
         let network_approval = Arc::clone(&network_approval);
         async move {
+            record_network_sandbox_violation(&blocked);
             network_approval.record_blocked_request(blocked).await;
         }
     })
@@ -860,7 +1016,6 @@ pub(crate) async fn begin_network_approval(
     session: &Session,
     turn_id: &str,
     managed_network_active: bool,
-    selected_sandbox: SandboxType,
     spec: Option<NetworkApprovalSpec>,
 ) -> Result<Option<ActiveNetworkApproval>, ToolError> {
     let NetworkApprovalSpec {
@@ -869,6 +1024,7 @@ pub(crate) async fn begin_network_approval(
         trigger,
         command,
         environment_id,
+        permission_profile,
     } = match spec {
         Some(spec) => spec,
         None => return Ok(None),
@@ -881,30 +1037,27 @@ pub(crate) async fn begin_network_approval(
     }
 
     let registration_id = Uuid::new_v4().to_string();
-    let execution_proxy = if selected_sandbox == SandboxType::LinuxSeccomp {
-        let attribution_token = Uuid::new_v4().to_string();
-        network
-            .for_execution(&environment_id, &registration_id, attribution_token)
-            .map_err(|err| {
-                ToolError::Codex(codex_protocol::error::CodexErr::Io(io::Error::other(
-                    format!("failed to create execution-scoped network proxy: {err}"),
-                )))
-            })?
-    } else {
-        network.clone()
-    };
+    let attribution_token = Uuid::new_v4().to_string();
+    let execution_proxy = network
+        .for_execution(&environment_id, &registration_id, attribution_token)
+        .map_err(|err| {
+            ToolError::Codex(codex_protocol::error::CodexErr::Io(io::Error::other(
+                format!("failed to create execution-scoped network proxy: {err}"),
+            )))
+        })?;
     let cancellation_token = CancellationToken::new();
     session
         .services
         .network_approval
-        .register_call(
-            registration_id.clone(),
-            turn_id.to_string(),
+        .register_call(ActiveNetworkApprovalCall {
+            registration_id: registration_id.clone(),
+            turn_id: turn_id.to_string(),
             trigger,
             command,
             environment_id,
-            cancellation_token.clone(),
-        )
+            permission_profile,
+            cancellation_token: cancellation_token.clone(),
+        })
         .await;
 
     Ok(Some(ActiveNetworkApproval {
@@ -926,7 +1079,7 @@ pub(crate) async fn finish_immediate_network_approval(
     session
         .services
         .network_approval
-        .finish_call(registration_id)
+        .finish_call(registration_id, &active.cancellation_token)
         .await
 }
 

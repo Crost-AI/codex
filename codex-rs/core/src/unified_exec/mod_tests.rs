@@ -1,6 +1,7 @@
 use super::head_tail_buffer::HeadTailBuffer;
 use super::*;
 use crate::codex_thread::BackgroundTerminalInfo;
+use crate::environment_selection::TurnEnvironmentState;
 use crate::exec::ExecCapturePolicy;
 use crate::exec::ExecExpiration;
 use crate::sandboxing::ExecRequest;
@@ -9,7 +10,6 @@ use crate::session::tests::make_session_and_context;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::ExecCommandToolOutput;
 use crate::unified_exec::WriteStdinRequest;
-use crate::unified_exec::process::OutputHandles;
 use codex_exec_server::ExecProcess;
 use codex_exec_server::ExecProcessEventReceiver;
 use codex_exec_server::ExecProcessFuture;
@@ -112,6 +112,8 @@ async fn exec_command_with_tty(
             .open_session_with_prepared_exec_env(
                 process_id,
                 &request,
+                codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
+                /*network_policy_decider*/ None,
                 tty,
                 Box::new(NoopSpawnLifecycle),
                 turn.environments
@@ -122,13 +124,17 @@ async fn exec_command_with_tty(
             )
             .await?,
     );
-    let context =
-        UnifiedExecContext::new(Arc::clone(session), Arc::clone(turn), "call".to_string());
+    let context = UnifiedExecContext::new(
+        Arc::clone(session),
+        crate::session::step_context::StepContext::for_test(Arc::clone(turn)),
+        "call".to_string(),
+    );
     let started_at = Instant::now();
     let process_started_alive = !process.has_exited() && process.exit_code().is_none();
     if process_started_alive {
         let entry = ProcessEntry {
             process: Arc::clone(&process),
+            plugin_metrics_sidecar: None,
             call_id: context.call_id.clone(),
             process_id,
             cwd: cwd.clone().into(),
@@ -147,20 +153,9 @@ async fn exec_command_with_tty(
             .insert(process_id, entry);
     }
 
-    let OutputHandles {
-        output_buffer,
-        output_notify,
-        output_closed,
-        output_closed_notify,
-        cancellation_token,
-    } = process.output_handles();
     let deadline = started_at + Duration::from_millis(yield_time_ms);
     let collected_output = UnifiedExecProcessManager::collect_output_until_deadline(
-        &output_buffer,
-        &output_notify,
-        &output_closed,
-        &output_closed_notify,
-        &cancellation_token,
+        process.output_handles(),
         Some(session.subscribe_elicitation_pause_state()),
         deadline,
     )
@@ -301,6 +296,7 @@ async fn blocking_terminate_unified_process(
                 allow_terminate,
                 wake_tx,
             }),
+            sandbox_type: Some(codex_sandboxing::SandboxType::None),
         })
         .await?,
     ))
@@ -321,6 +317,7 @@ async fn write_stdin(
             yield_time_ms,
             max_output_tokens: None,
             truncation_policy: TruncationPolicy::Tokens(10_000),
+            interaction_event: None,
         })
         .await
 }
@@ -551,67 +548,6 @@ async fn unified_exec_pause_blocks_yield_timeout() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-#[ignore] // Ignored while we have a better way to test this.
-async fn requests_with_large_timeout_are_capped() -> anyhow::Result<()> {
-    let (session, turn) = test_session_and_turn().await;
-
-    let result = exec_command(
-        &session,
-        &turn,
-        "echo codex",
-        /*yield_time_ms*/ 120_000,
-        /*workdir*/ None,
-    )
-    .await?;
-
-    assert!(result.process_id.is_some());
-    assert!(
-        result
-            .truncated_output(DEFAULT_MAX_OUTPUT_TOKENS)
-            .contains("codex")
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore] // Ignored while we have a better way to test this.
-async fn completed_commands_do_not_persist_sessions() -> anyhow::Result<()> {
-    let (session, turn) = test_session_and_turn().await;
-    let result = exec_command(
-        &session,
-        &turn,
-        "echo codex",
-        /*yield_time_ms*/ 2_500,
-        /*workdir*/ None,
-    )
-    .await?;
-
-    assert!(
-        result.process_id.is_some(),
-        "completed command should report a process id"
-    );
-    assert!(
-        result
-            .truncated_output(DEFAULT_MAX_OUTPUT_TOKENS)
-            .contains("codex")
-    );
-
-    assert!(
-        session
-            .services
-            .unified_exec_manager
-            .process_store
-            .lock()
-            .await
-            .processes
-            .is_empty()
-    );
-
-    Ok(())
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reusing_completed_process_returns_unknown_process() -> anyhow::Result<()> {
     skip_if_sandbox!(Ok(()));
@@ -672,6 +608,7 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
         process_id,
         ProcessEntry {
             process,
+            plugin_metrics_sidecar: None,
             call_id: "call".to_string(),
             process_id,
             cwd: cwd.into(),
@@ -745,6 +682,7 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
         process_id,
         ProcessEntry {
             process: Arc::clone(&process),
+            plugin_metrics_sidecar: None,
             call_id: "call".to_string(),
             process_id,
             cwd: cwd.into(),
@@ -812,6 +750,8 @@ async fn completed_pipe_commands_preserve_exit_code() -> anyhow::Result<()> {
         .open_session_with_prepared_exec_env(
             /*process_id*/ 1234,
             &request,
+            codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
+            /*network_policy_decider*/ None,
             /*tty*/ false,
             Box::new(NoopSpawnLifecycle),
             &environment,
@@ -852,6 +792,8 @@ async fn unified_exec_uses_remote_exec_server_when_configured() -> anyhow::Resul
         .open_session_with_prepared_exec_env(
             /*process_id*/ 1234,
             &request,
+            codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
+            /*network_policy_decider*/ None,
             /*tty*/ true,
             Box::new(NoopSpawnLifecycle),
             remote_test_env.environment(),
@@ -861,19 +803,8 @@ async fn unified_exec_uses_remote_exec_server_when_configured() -> anyhow::Resul
     process.write(b"printf 'remote-unified-exec\\n'\n").await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let crate::unified_exec::process::OutputHandles {
-        output_buffer,
-        output_notify,
-        output_closed,
-        output_closed_notify,
-        cancellation_token,
-    } = process.output_handles();
     let collected = UnifiedExecProcessManager::collect_output_until_deadline(
-        &output_buffer,
-        &output_notify,
-        &output_closed,
-        &output_closed_notify,
-        &cancellation_token,
+        process.output_handles(),
         /*pause_state*/ None,
         Instant::now() + Duration::from_millis(2_500),
     )
@@ -891,8 +822,10 @@ async fn remote_exec_server_rejects_inherited_fd_launches() -> anyhow::Result<()
 
     let remote_test_env = remote_test_env().await?;
     let (_, mut turn) = make_session_and_context().await;
-    turn.environments.turn_environments[0].environment =
-        Arc::new(remote_test_env.environment().clone());
+    let TurnEnvironmentState::Ready(environment) = &mut turn.environments.environments[0] else {
+        panic!("expected ready primary environment");
+    };
+    environment.environment = Arc::new(remote_test_env.environment().clone());
 
     #[allow(deprecated)]
     let cwd = turn.cwd.clone();
@@ -908,6 +841,8 @@ async fn remote_exec_server_rejects_inherited_fd_launches() -> anyhow::Result<()
         .open_session_with_prepared_exec_env(
             /*process_id*/ 1234,
             &request,
+            codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
+            /*network_policy_decider*/ None,
             /*tty*/ true,
             Box::new(TestSpawnLifecycle {
                 inherited_fds: vec![42],

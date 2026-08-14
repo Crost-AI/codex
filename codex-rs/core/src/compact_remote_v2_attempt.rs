@@ -10,19 +10,19 @@ use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
-use crate::session::turn::built_tools;
+use codex_history::CodexHarnessMetadata;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::TokenUsage;
 use codex_rollout_trace::CompactionTraceContext;
-use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 pub(super) struct RemoteCompactV2Attempt {
-    pub(super) trace_input_history: Vec<ResponseItem>,
+    pub(super) trace_input_history: Option<Vec<ResponseItem>>,
     pub(super) prompt_input: Vec<ResponseItem>,
+    pub(super) prompt_input_metadata: Vec<Option<CodexHarnessMetadata>>,
     pub(super) compaction_output: ResponseItem,
     pub(super) token_usage: Option<TokenUsage>,
     /// Keeps a session created for standalone compaction alive through lifecycle completion.
@@ -65,20 +65,20 @@ pub(super) async fn run_remote_compact_v2_attempt(
             });
     }
 
-    let trace_input_history = history.raw_items().to_vec();
-    let prompt_input = history.for_prompt(&turn_context.model_info.input_modalities);
-    let tool_router = built_tools(
-        sess.as_ref(),
-        step_context.as_ref(),
-        &CancellationToken::new(),
-    )
-    .await?;
-    let mut input = prompt_input.clone();
+    let trace_input_history = compaction_trace
+        .is_enabled()
+        .then(|| history.raw_items().cloned().collect());
+    let (mut input, prompt_input_metadata): (Vec<_>, Vec<_>) = history
+        .for_prompt_annotated(&turn_context.model_info.input_modalities)
+        .into_iter()
+        .map(|envelope| (envelope.item, envelope.metadata))
+        .unzip();
+    let tool_router = &step_context.tool_router;
     input.push(ResponseItem::CompactionTrigger {});
     let prompt = Prompt {
         input,
         tools: tool_router.model_visible_specs(),
-        parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
+        parallel_tool_calls: true,
         base_instructions,
         output_schema: None,
         output_schema_strict: true,
@@ -129,9 +129,12 @@ pub(super) async fn run_remote_compact_v2_attempt(
         }),
     )
     .await;
+    let mut prompt_input = prompt.input;
+    prompt_input.pop();
     Ok(RemoteCompactV2Attempt {
         trace_input_history,
         prompt_input,
+        prompt_input_metadata,
         compaction_output,
         token_usage,
         owned_client_session,

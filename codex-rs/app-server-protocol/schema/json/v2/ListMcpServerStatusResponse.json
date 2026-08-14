@@ -3,6 +3,7 @@
   "definitions": {
     "McpAuthStatus": {
       "enum": [
+        "unknown",
         "unsupported",
         "notLoggedIn",
         "bearerToken",
@@ -56,8 +57,21 @@
         "authStatus": {
           "$ref": "#/definitions/McpAuthStatus"
         },
+        "declaresChannelCapability": {
+          "description": "Whether the connected server declared the experimental `codex/channel` capability. Null while the server has not (yet) initialized.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "name": {
           "type": "string"
+        },
+        "pluginId": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "resourceTemplates": {
           "items": {
@@ -81,6 +95,13 @@
             }
           ]
         },
+        "source": {
+          "description": "Human-readable source of the winning server definition (e.g. \"config.toml (user)\" or \"plugin `acme`\"). Null when unknown.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "tools": {
           "additionalProperties": {
             "$ref": "#/definitions/Tool"
@@ -91,6 +112,7 @@
       "required": [
         "authStatus",
         "name",
+        "overriddenSources",
         "resourceTemplates",
         "resources",
         "tools"

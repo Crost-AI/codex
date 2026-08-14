@@ -32,6 +32,7 @@ use crossterm::style::SetColors;
 use crossterm::style::SetForegroundColor;
 use crossterm::terminal::Clear;
 use crossterm::terminal::ClearType;
+use ratatui::backend::IntoCrossterm;
 use ratatui::layout::Size;
 use ratatui::prelude::Backend;
 use ratatui::style::Color;
@@ -63,7 +64,7 @@ pub fn insert_history_lines<B>(
     lines: Vec<Line>,
 ) -> io::Result<()>
 where
-    B: Backend + Write,
+    B: Backend<Error = io::Error> + Write,
 {
     insert_history_lines_with_wrap_policy(terminal, lines, HistoryLineWrapPolicy::PreWrap)
 }
@@ -74,7 +75,7 @@ pub fn insert_history_lines_with_wrap_policy<B>(
     wrap_policy: HistoryLineWrapPolicy,
 ) -> io::Result<()>
 where
-    B: Backend + Write,
+    B: Backend<Error = io::Error> + Write,
 {
     insert_history_lines_with_mode_and_wrap_policy(
         terminal,
@@ -91,11 +92,11 @@ pub(crate) fn insert_history_lines_with_mode_and_wrap_policy<B>(
     wrap_policy: HistoryLineWrapPolicy,
 ) -> io::Result<()>
 where
-    B: Backend + Write,
+    B: Backend<Error = io::Error> + Write,
 {
     insert_history_hyperlink_lines_with_mode_and_wrap_policy(
         terminal,
-        plain_hyperlink_lines(lines.iter().map(line_to_static).collect()),
+        &plain_hyperlink_lines(lines.iter().map(line_to_static).collect()),
         mode,
         wrap_policy,
     )
@@ -103,12 +104,12 @@ where
 
 pub(crate) fn insert_history_hyperlink_lines_with_mode_and_wrap_policy<B>(
     terminal: &mut crate::custom_terminal::Terminal<B>,
-    lines: Vec<HyperlinkLine>,
+    lines: &[HyperlinkLine],
     mode: InsertHistoryMode,
     wrap_policy: HistoryLineWrapPolicy,
 ) -> io::Result<()>
 where
-    B: Backend + Write,
+    B: Backend<Error = io::Error> + Write,
 {
     let screen_size = terminal.backend().size().unwrap_or(Size::new(0, 0));
 
@@ -128,36 +129,7 @@ where
     // - Non-URL lines also flow through adaptive wrapping; behavior is
     //   equivalent to standard wrapping when no URL is present.
     let wrap_width = area.width.max(1) as usize;
-    let mut wrapped = Vec::new();
-    let mut wrapped_rows = 0usize;
-
-    for line in &lines {
-        let line_wrapped = match wrap_policy {
-            HistoryLineWrapPolicy::Terminal => vec![line.clone()],
-            HistoryLineWrapPolicy::PreWrap
-                if line_contains_url_like(&line.line)
-                    && !line_has_mixed_url_and_non_url_tokens(&line.line) =>
-            {
-                vec![line.clone()]
-            }
-            HistoryLineWrapPolicy::PreWrap => remap_wrapped_line(
-                line,
-                adaptive_wrap_line(
-                    &line.line,
-                    RtOptions::new(wrap_width)
-                        .subsequent_indent(leading_whitespace_prefix(&line.line)),
-                )
-                .into_iter()
-                .map(|line| line_to_static(&line))
-                .collect(),
-            ),
-        };
-        wrapped_rows += line_wrapped
-            .iter()
-            .map(|wrapped_line| wrapped_line.width().max(1).div_ceil(wrap_width))
-            .sum::<usize>();
-        wrapped.extend(line_wrapped);
-    }
+    let (wrapped, wrapped_rows) = wrap_history_hyperlink_lines(lines, wrap_width, wrap_policy);
     let wrapped_lines = wrapped_rows as u16;
     match mode {
         InsertHistoryMode::ZellijRaw => {
@@ -255,6 +227,45 @@ where
     Ok(())
 }
 
+pub(crate) fn wrap_history_hyperlink_lines(
+    lines: &[HyperlinkLine],
+    wrap_width: usize,
+    wrap_policy: HistoryLineWrapPolicy,
+) -> (Vec<HyperlinkLine>, usize) {
+    let mut wrapped = Vec::new();
+    let mut wrapped_rows = 0usize;
+
+    for line in lines {
+        let line_wrapped = match wrap_policy {
+            HistoryLineWrapPolicy::Terminal => vec![line.clone()],
+            HistoryLineWrapPolicy::PreWrap
+                if line_contains_url_like(&line.line)
+                    && !line_has_mixed_url_and_non_url_tokens(&line.line) =>
+            {
+                vec![line.clone()]
+            }
+            HistoryLineWrapPolicy::PreWrap => remap_wrapped_line(
+                line,
+                adaptive_wrap_line(
+                    &line.line,
+                    RtOptions::new(wrap_width)
+                        .subsequent_indent(leading_whitespace_prefix(&line.line)),
+                )
+                .into_iter()
+                .map(|line| line_to_static(&line))
+                .collect(),
+            ),
+        };
+        wrapped_rows += line_wrapped
+            .iter()
+            .map(|wrapped_line| wrapped_line.width().max(/*other*/ 1).div_ceil(wrap_width))
+            .sum::<usize>();
+        wrapped.extend(line_wrapped);
+    }
+
+    (wrapped, wrapped_rows)
+}
+
 pub(crate) fn leading_whitespace_prefix(line: &Line<'_>) -> Line<'static> {
     let mut spans = Vec::new();
     for span in &line.spans {
@@ -299,12 +310,12 @@ fn write_history_line<W: Write>(
             line.line
                 .style
                 .fg
-                .map(std::convert::Into::into)
+                .map(IntoCrossterm::into_crossterm)
                 .unwrap_or(CColor::Reset),
             line.line
                 .style
                 .bg
-                .map(std::convert::Into::into)
+                .map(IntoCrossterm::into_crossterm)
                 .unwrap_or(CColor::Reset)
         ))
     )?;
@@ -459,7 +470,10 @@ where
         if next_fg != fg || next_bg != bg {
             queue!(
                 writer,
-                SetColors(Colors::new(next_fg.into(), next_bg.into()))
+                SetColors(Colors::new(
+                    next_fg.into_crossterm(),
+                    next_bg.into_crossterm()
+                ))
             )?;
             fg = next_fg;
             bg = next_bg;
@@ -787,6 +801,94 @@ mod tests {
             !rows.iter().any(|r| r.trim_end() == "│"),
             "unexpected orphan prefix row, rows: {rows:?}"
         );
+    }
+
+    #[test]
+    fn vt100_user_message_url_wrap_preserves_gutter_and_background() {
+        use crate::history_cell::HistoryCell;
+        use crate::history_cell::UserHistoryCell;
+
+        let width = 36;
+        let height = 12;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        term.set_viewport_area(Rect::new(
+            /*x*/ 0,
+            /*y*/ height - 1,
+            /*width*/ width,
+            /*height*/ 1,
+        ));
+
+        let url = "https://example.test/forwarded/threads/10930?page=1&queue=customer_support_unprocessed&forwardedScope=all";
+        let cell = UserHistoryCell {
+            message: url.to_string(),
+            text_elements: Vec::new(),
+            local_image_paths: Vec::new(),
+            remote_image_urls: Vec::new(),
+        };
+        let lines = cell
+            .display_hyperlink_lines(width)
+            .into_iter()
+            .map(|line| line.style(ratatui::style::Style::default().bg(Color::Blue)))
+            .collect::<Vec<_>>();
+
+        insert_history_hyperlink_lines_with_mode_and_wrap_policy(
+            &mut term,
+            &lines,
+            InsertHistoryMode::Standard,
+            HistoryLineWrapPolicy::PreWrap,
+        )
+        .expect("insert wrapped user message");
+
+        let screen = term.backend().vt100().screen();
+        let rows = screen.rows(/*start*/ 0, width).collect::<Vec<_>>();
+        let message_rows = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| !row.trim().is_empty())
+            .collect::<Vec<_>>();
+
+        assert!(message_rows.len() > 1, "expected wrapped URL: {rows:?}");
+        assert!(
+            message_rows[0].1.starts_with("› "),
+            "the first user-message row must retain its prompt: {rows:?}"
+        );
+        assert!(
+            message_rows
+                .iter()
+                .skip(/*n*/ 1)
+                .all(|(_, row)| row.starts_with("  ")),
+            "all wrapped URL rows must preserve the message gutter: {rows:?}"
+        );
+        assert_eq!(
+            message_rows
+                .iter()
+                .enumerate()
+                .map(|(index, (_, row))| {
+                    if index == 0 {
+                        row.strip_prefix("› ").unwrap().trim()
+                    } else {
+                        row.trim()
+                    }
+                })
+                .collect::<String>(),
+            url
+        );
+        for (row, _) in message_rows {
+            assert_ne!(
+                screen.cell(row as u16, /*col*/ 0).unwrap().bgcolor(),
+                vt100::Color::Default,
+                "wrapped user-message gutter lost its background on row {row}"
+            );
+            assert_ne!(
+                screen
+                    .cell(row as u16, /*col*/ width - 1)
+                    .unwrap()
+                    .bgcolor(),
+                vt100::Color::Default,
+                "wrapped user-message row lost its background after the URL on row {row}"
+            );
+        }
     }
 
     #[test]

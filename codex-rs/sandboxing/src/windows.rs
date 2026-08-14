@@ -29,14 +29,8 @@ pub struct WindowsSandboxFilesystemOverrides {
     pub additional_deny_write_paths: Vec<AbsolutePathBuf>,
 }
 
-pub fn windows_sandbox_uses_elevated_backend(
-    sandbox_level: WindowsSandboxLevel,
-    proxy_enforced: bool,
-) -> bool {
-    // Windows firewall enforcement is tied to the logon-user sandbox identities, so
-    // proxy-enforced sessions must use that backend even when the configured mode is
-    // the default restricted-token sandbox.
-    proxy_enforced || matches!(sandbox_level, WindowsSandboxLevel::Elevated)
+pub fn windows_sandbox_uses_elevated_backend(sandbox_level: WindowsSandboxLevel) -> bool {
+    matches!(sandbox_level, WindowsSandboxLevel::Elevated)
 }
 
 pub fn permission_profile_supports_windows_restricted_token_sandbox(
@@ -107,10 +101,10 @@ pub fn resolve_windows_restricted_token_filesystem_overrides(
         ));
     }
 
-    // Windows protects built-in metadata defaults through the legacy writable
-    // root projection when those paths exist. Do not turn missing generated
-    // defaults into explicit deny-write sentinels.
-    file_system_sandbox_policy.remove_generated_defaults();
+    // Windows protects existing metadata paths through the legacy writable root
+    // projection. Do not turn skip-missing entries into newly-created
+    // deny-write sentinels.
+    file_system_sandbox_policy.remove_skip_missing_path_entries();
 
     // The restricted-token backend can still enforce split write restrictions,
     // but its WRITE_RESTRICTED token does not make capability SID deny-read ACEs
@@ -237,10 +231,10 @@ pub fn resolve_windows_elevated_filesystem_overrides(
         ));
     }
 
-    // Windows protects built-in metadata defaults through the legacy writable
-    // root projection when those paths exist. Do not turn missing generated
-    // defaults into explicit deny-write sentinels.
-    file_system_sandbox_policy.remove_generated_defaults();
+    // Windows protects existing metadata paths through the legacy writable root
+    // projection. Do not turn skip-missing entries into newly-created
+    // deny-write sentinels.
+    file_system_sandbox_policy.remove_skip_missing_path_entries();
 
     let additional_deny_read_paths = codex_windows_sandbox::resolve_windows_deny_read_paths(
         &file_system_sandbox_policy,

@@ -373,8 +373,8 @@ impl SessionTelemetry {
         &'a self,
         tags: &'a [(&'a str, &'a str)],
     ) -> MetricsResult<Vec<(&'a str, &'a str)>> {
-        let mut merged = self.metadata_tag_refs()?;
-        merged.extend(tags.iter().copied());
+        let mut merged = tags.to_vec();
+        merged.extend(self.metadata_tag_refs()?);
         Ok(merged)
     }
 
@@ -992,16 +992,25 @@ impl SessionTelemetry {
         tool_name: &str,
         call_id: &str,
         decision: &ReviewDecision,
-        source: ToolDecisionSource,
+        source: Option<ToolDecisionSource>,
     ) {
-        log_event!(
-            self,
-            event.name = "codex.tool_decision",
-            tool_name = %tool_name,
-            call_id = %call_id,
-            decision = %decision.clone().to_string().to_lowercase(),
-            source = %source.to_string(),
-        );
+        match source {
+            Some(source) => log_event!(
+                self,
+                event.name = "codex.tool_decision",
+                tool_name = %tool_name,
+                call_id = %call_id,
+                decision = %decision.to_opaque_string(),
+                source = %source.to_string(),
+            ),
+            None => log_event!(
+                self,
+                event.name = "codex.tool_decision",
+                tool_name = %tool_name,
+                call_id = %call_id,
+                decision = %decision.to_opaque_string(),
+            ),
+        }
     }
 
     pub fn sandbox_outcome(

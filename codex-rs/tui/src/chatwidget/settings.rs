@@ -236,6 +236,7 @@ impl ChatWidget {
         self.status_line_workspace_headline_pending_request_id = None;
         self.status_line_workspace_headline_last_requested_at = None;
         self.status_line_workspace_messages_disabled = false;
+        self.clear_thread_usage_state();
         self.status_account_display = status_account_display;
         self.plan_type = plan_type;
         self.has_chatgpt_account = has_chatgpt_account;
@@ -470,6 +471,9 @@ impl ChatWidget {
         self.sync_image_paste_enabled();
         self.sync_service_tier_commands();
         self.refresh_terminal_title();
+        let effort = self.effective_reasoning_effort();
+        self.bottom_pane
+            .set_active_reasoning_effort(effort.as_ref());
     }
 
     /// Refresh every UI surface that depends on the effective model, reasoning
@@ -602,7 +606,7 @@ impl ChatWidget {
         }
         match self.active_mode_kind() {
             ModeKind::Plan => Some(CollaborationModeIndicator::Plan),
-            ModeKind::Default | ModeKind::PairProgramming | ModeKind::Execute => None,
+            ModeKind::Default => None,
         }
     }
 

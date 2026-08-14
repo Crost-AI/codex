@@ -44,6 +44,7 @@ pub enum SlashCommand {
     Side,
     Btw,
     Copy,
+    Export,
     Raw,
     Diff,
     Mention,
@@ -56,6 +57,7 @@ pub enum SlashCommand {
     #[strum(to_string = "pets", serialize = "pet")]
     Pets,
     Mcp,
+    Channels,
     Apps,
     Plugins,
     Logout,
@@ -93,9 +95,10 @@ impl SlashCommand {
             SlashCommand::Delete => "permanently delete this session and exit",
             SlashCommand::Clear => "clear the terminal and start a new chat",
             SlashCommand::Fork => "fork the current chat",
-            SlashCommand::App => "continue this session in Codex Desktop",
+            SlashCommand::App => "continue this session in the Desktop app",
             SlashCommand::Quit | SlashCommand::Exit => "exit Codex",
             SlashCommand::Copy => "copy last response as markdown",
+            SlashCommand::Export => "export the conversation as markdown",
             SlashCommand::Raw => "toggle raw scrollback mode for copy-friendly terminal selection",
             SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Mention => "mention a file",
@@ -135,6 +138,7 @@ impl SlashCommand {
             SlashCommand::AutoReview => "approve one retry of a recent auto-review denial",
             SlashCommand::Memories => "configure memory use and generation",
             SlashCommand::Mcp => "list configured MCP tools; use /mcp verbose for details",
+            SlashCommand::Channels => "show channel opt-ins and their status",
             SlashCommand::Apps => "manage apps",
             SlashCommand::Plugins => "browse plugins",
             SlashCommand::Logout => "log out of Codex",
@@ -155,11 +159,15 @@ impl SlashCommand {
             self,
             SlashCommand::Review
                 | SlashCommand::Rename
+                | SlashCommand::New
+                | SlashCommand::Clear
+                | SlashCommand::Fork
                 | SlashCommand::Plan
                 | SlashCommand::Goal
                 | SlashCommand::Ide
                 | SlashCommand::Keymap
                 | SlashCommand::Mcp
+                | SlashCommand::Export
                 | SlashCommand::Raw
                 | SlashCommand::Usage
                 | SlashCommand::Pets
@@ -175,6 +183,7 @@ impl SlashCommand {
         matches!(
             self,
             SlashCommand::Copy
+                | SlashCommand::Export
                 | SlashCommand::Raw
                 | SlashCommand::Diff
                 | SlashCommand::Mention
@@ -193,6 +202,7 @@ impl SlashCommand {
             | SlashCommand::Fork
             | SlashCommand::Init
             | SlashCommand::Compact
+            | SlashCommand::Export
             | SlashCommand::Keymap
             | SlashCommand::Vim
             | SlashCommand::ElevateSandbox
@@ -225,6 +235,7 @@ impl SlashCommand {
             | SlashCommand::App
             | SlashCommand::Goal
             | SlashCommand::Mcp
+            | SlashCommand::Channels
             | SlashCommand::Apps
             | SlashCommand::Plugins
             | SlashCommand::Title

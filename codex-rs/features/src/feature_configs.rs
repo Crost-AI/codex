@@ -6,9 +6,23 @@ use std::collections::BTreeMap;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct ToolRegistryConfigToml {
+    /// Fail the turn when multiple tools share the same effective name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_on_tool_collisions: Option<bool>,
+    /// Include authoritative tool information in per-turn request metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_metadata_includes_tool_info: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CodeModeConfigToml {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// Default yield timeout for code-mode exec calls, in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_exec_yield_time_ms: Option<u64>,
     /// Exact tool namespaces to omit from the code-mode nested tool surface.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub excluded_tool_namespaces: Option<Vec<String>>,
@@ -23,9 +37,37 @@ impl FeatureConfig for CodeModeConfigToml {
     fn enabled(&self) -> Option<bool> {
         self.enabled
     }
+}
 
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = Some(enabled);
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CodeModeHostConfigToml {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Keep code mode fail-closed when the standalone host is unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable_in_process_fallback: Option<bool>,
+}
+
+impl FeatureConfig for CodeModeHostConfigToml {
+    fn enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NonPrefixedMcpToolNamesConfigToml {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// MCP servers whose tools should omit the legacy `mcp__` namespace prefix.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_names: Option<Vec<String>>,
+}
+
+impl FeatureConfig for NonPrefixedMcpToolNamesConfigToml {
+    fn enabled(&self) -> Option<bool> {
+        self.enabled
     }
 }
 
@@ -55,6 +97,9 @@ pub struct MultiAgentV2ConfigToml {
     pub root_agent_usage_hint_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent_usage_hint_text: Option<String>,
+    /// Overrides inherited developer instructions for subagents without role-specific instructions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_developer_instructions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multi_agent_mode_hint_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,6 +111,9 @@ pub struct MultiAgentV2ConfigToml {
     /// corresponding guidance to root and subagent usage hints.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expose_spawn_agent_model_overrides: Option<bool>,
+    /// Expose the multi-agent v2 `wait_agent` tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait_agent_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub non_code_mode_only: Option<bool>,
 }
@@ -73,10 +121,6 @@ pub struct MultiAgentV2ConfigToml {
 impl FeatureConfig for MultiAgentV2ConfigToml {
     fn enabled(&self) -> Option<bool> {
         self.enabled
-    }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = Some(enabled);
     }
 }
 
@@ -112,10 +156,6 @@ impl FeatureConfig for TokenBudgetConfigToml {
     fn enabled(&self) -> Option<bool> {
         self.enabled
     }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = Some(enabled);
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
@@ -140,10 +180,6 @@ pub struct RolloutBudgetConfigToml {
 impl FeatureConfig for RolloutBudgetConfigToml {
     fn enabled(&self) -> Option<bool> {
         self.enabled
-    }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = Some(enabled);
     }
 }
 
@@ -185,10 +221,6 @@ pub struct CurrentTimeReminderConfigToml {
 impl FeatureConfig for CurrentTimeReminderConfigToml {
     fn enabled(&self) -> Option<bool> {
         self.enabled
-    }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = Some(enabled);
     }
 }
 
@@ -233,10 +265,6 @@ pub struct NetworkProxyConfigToml {
 impl FeatureConfig for NetworkProxyConfigToml {
     fn enabled(&self) -> Option<bool> {
         self.enabled
-    }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = Some(enabled);
     }
 }
 

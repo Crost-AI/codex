@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 use std::path::Path;
 
 use crate::HooksToml;
@@ -29,6 +30,7 @@ use crate::types::UriBasedFileOpener;
 use crate::types::WindowsToml;
 use codex_features::FeaturesToml;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
 use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
@@ -58,18 +60,15 @@ use serde::Serialize;
 use serde::de::Error as SerdeError;
 use serde_json::Value as JsonValue;
 
-const RESERVED_MODEL_PROVIDER_IDS: [&str; 4] = [
+const RESERVED_MODEL_PROVIDER_IDS: [&str; 5] = [
     AMAZON_BEDROCK_PROVIDER_ID,
+    AMAZON_BEDROCK_RUNTIME_PROVIDER_ID,
     OPENAI_PROVIDER_ID,
     OLLAMA_OSS_PROVIDER_ID,
     LMSTUDIO_OSS_PROVIDER_ID,
 ];
 
 pub const DEFAULT_PROJECT_DOC_MAX_BYTES: usize = 32 * 1024;
-
-const fn default_allow_login_shell() -> Option<bool> {
-    Some(true)
-}
 
 fn default_history() -> Option<History> {
     Some(History::default())
@@ -133,6 +132,23 @@ of strings; comma-separated strings are not supported. Use \
     }
 }
 
+/// `[channels]` settings controlling which MCP servers may push events into
+/// a running session.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ChannelsToml {
+    /// Master switch for the channels feature. Defaults to true. The
+    /// CODEX_CHANNELS_ENABLED environment variable overrides this value but is
+    /// itself overridden by managed config.
+    pub enabled: Option<bool>,
+    /// Optional allowlist of channel entry strings (e.g. `server:discord`).
+    /// Unset allows any requested entry; an empty list allows none.
+    pub allowed: Option<Vec<String>>,
+    /// Channel entries to activate for sessions, equivalent to passing
+    /// `--channels` on the command line.
+    pub entries: Option<Vec<String>>,
+}
+
 /// Orchestrator-owned feature settings.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -193,7 +209,6 @@ pub struct ConfigToml {
     /// If `false`, the model can never use a login shell: `login = true`
     /// requests are rejected, and omitting `login` defaults to a non-login
     /// shell.
-    #[serde(default = "default_allow_login_shell")]
     pub allow_login_shell: Option<bool>,
 
     /// Sandbox mode to use.
@@ -258,6 +273,10 @@ pub struct ConfigToml {
     #[serde(default)]
     pub cli_auth_credentials_store: Option<AuthCredentialsStoreMode>,
 
+    /// Channel settings: which MCP servers may push events into a session.
+    #[serde(default)]
+    pub channels: Option<ChannelsToml>,
+
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     #[serde(default)]
     // Uses the raw MCP input shape (custom deserialization) rather than `McpServerConfig`.
@@ -287,7 +306,7 @@ pub struct ConfigToml {
     #[serde(default, deserialize_with = "deserialize_model_providers")]
     pub model_providers: HashMap<String, ModelProviderInfo>,
 
-    /// Maximum number of bytes to include from an AGENTS.md project doc file.
+    /// Maximum total bytes of project instruction content across all selected environments.
     #[serde(default = "default_project_doc_max_bytes")]
     pub project_doc_max_bytes: Option<usize>,
 
@@ -330,9 +349,6 @@ pub struct ConfigToml {
     /// Defaults to `$CODEX_HOME/log`.
     pub log_dir: Option<AbsolutePathBuf>,
 
-    /// Debugging and reproducibility settings.
-    pub debug: Option<DebugToml>,
-
     /// Optional URI-based file opener. If set, citations to files in the model
     /// output will be hyperlinked using the specified URI scheme.
     pub file_opener: Option<UriBasedFileOpener>,
@@ -371,6 +387,9 @@ pub struct ConfigToml {
 
     /// Optional product SKU forwarded on host-owned Codex Apps MCP requests.
     pub apps_mcp_product_sku: Option<String>,
+
+    /// Bounded, product-owned metadata attached to every Responses API request.
+    pub responses_api_metadata: Option<BTreeMap<String, String>>,
 
     /// Orchestrator-owned feature settings.
     pub orchestrator: Option<OrchestratorToml>,
@@ -435,6 +454,9 @@ pub struct ConfigToml {
 
     /// Agent-related settings (thread limits, etc.).
     pub agents: Option<AgentsToml>,
+
+    /// Goal-related settings.
+    pub goals: Option<GoalsToml>,
 
     /// Memories subsystem settings.
     pub memories: Option<MemoriesToml>,
@@ -513,38 +535,6 @@ pub struct ConfigToml {
     pub experimental_use_unified_exec_tool: Option<bool>,
     /// Preferred OSS provider for local models, e.g. "lmstudio" or "ollama".
     pub oss_provider: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct ConfigLockfileToml {
-    pub version: u32,
-    pub codex_version: String,
-
-    /// Replayable effective config captured in the lockfile.
-    pub config: ConfigToml,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct DebugToml {
-    pub config_lockfile: Option<DebugConfigLockToml>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct DebugConfigLockToml {
-    /// Directory where Codex writes effective session config lock files.
-    pub export_dir: Option<AbsolutePathBuf>,
-
-    /// Lockfile to replay as the authoritative effective config.
-    pub load_path: Option<AbsolutePathBuf>,
-
-    /// Allow replaying a lock generated by a different Codex version.
-    pub allow_codex_version_mismatch: Option<bool>,
-
-    /// Save fields resolved from the model catalog/session configuration.
-    pub save_fields_resolved_from_model_catalog: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
@@ -641,11 +631,19 @@ pub struct ToolsToml {
     )]
     pub web_search: Option<WebSearchToolConfig>,
     pub experimental_request_user_input: Option<ExperimentalRequestUserInput>,
+    pub update_plan: Option<UpdatePlanToolConfig>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ExperimentalRequestUserInput {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct UpdatePlanToolConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -677,6 +675,13 @@ where
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
+pub struct GoalsToml {
+    /// Maximum token budget allowed for a goal and default budget for new goals.
+    pub max_goal_token_budget: Option<NonZeroU64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct AgentsToml {
     /// Whether multi-agent tools are enabled. Defaults to true.
     /// An enabled `features.multi_agent_v2` setting takes precedence.
@@ -688,12 +693,12 @@ pub struct AgentsToml {
     pub max_concurrent_threads_per_session: Option<usize>,
     /// Maximum nesting depth for V1 agent threads. Ignored by V2.
     pub max_depth: Option<i32>,
-    /// Reserved default model for spawned subagents. Currently ignored.
+    /// Default model for spawned subagents when the spawn call does not select one.
     pub default_subagent_model: Option<String>,
-    /// Reserved default reasoning effort for spawned subagents. Currently ignored.
+    /// Default reasoning effort for spawned subagents when the spawn call does not select one.
     pub default_subagent_reasoning_effort: Option<ReasoningEffort>,
-    /// Default maximum runtime in seconds for agent job workers.
-    #[schemars(range(min = 1))]
+    /// Removed agent-job setting retained as a no-op for compatibility.
+    #[schemars(skip)]
     pub job_max_runtime_seconds: Option<u64>,
     /// Whether to record a model-visible message when an agent turn is interrupted.
     /// Defaults to true.
@@ -901,8 +906,10 @@ pub fn validate_reserved_model_provider_ids(
     let mut conflicts = model_providers
         .keys()
         .filter(|key| {
-            key.as_str() != AMAZON_BEDROCK_PROVIDER_ID
-                && RESERVED_MODEL_PROVIDER_IDS.contains(&key.as_str())
+            !matches!(
+                key.as_str(),
+                AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID
+            ) && RESERVED_MODEL_PROVIDER_IDS.contains(&key.as_str())
         })
         .map(|key| format!("`{key}`"))
         .collect::<Vec<_>>();
@@ -923,18 +930,21 @@ pub fn validate_model_providers(
 ) -> Result<(), String> {
     validate_reserved_model_provider_ids(model_providers)?;
     for (key, provider) in model_providers {
-        if key == AMAZON_BEDROCK_PROVIDER_ID {
-            continue;
-        }
-        if provider.aws.is_some() {
-            return Err(format!(
-                "model_providers.{key}: provider aws is only supported for `{AMAZON_BEDROCK_PROVIDER_ID}`"
-            ));
-        }
-        if provider.name.trim().is_empty() {
-            return Err(format!(
-                "model_providers.{key}: provider name must not be empty"
-            ));
+        if !matches!(
+            key.as_str(),
+            AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID
+        ) {
+            if provider.aws.is_some() {
+                return Err(format!(
+                    "model_providers.{key}: provider aws is only supported for \
+`{AMAZON_BEDROCK_PROVIDER_ID}` or `{AMAZON_BEDROCK_RUNTIME_PROVIDER_ID}`"
+                ));
+            }
+            if provider.name.trim().is_empty() {
+                return Err(format!(
+                    "model_providers.{key}: provider name must not be empty"
+                ));
+            }
         }
         provider
             .validate()
@@ -953,6 +963,10 @@ where
     validate_model_providers(&model_providers).map_err(serde::de::Error::custom)?;
     Ok(model_providers)
 }
+
+#[cfg(test)]
+#[path = "bedrock_runtime_tests.rs"]
+mod bedrock_runtime_tests;
 
 pub fn validate_oss_provider(provider: &str) -> std::io::Result<()> {
     match provider {
@@ -1020,5 +1034,22 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("TOML list of strings"));
         assert!(message.contains("comma-separated strings are not supported"));
+    }
+
+    #[test]
+    fn amazon_bedrock_auth_command_must_not_be_empty() {
+        let err = toml::from_str::<ConfigToml>(
+            r#"
+[model_providers.amazon-bedrock.auth]
+command = "   "
+"#,
+        )
+        .expect_err("empty Amazon Bedrock auth command should be rejected");
+
+        assert!(
+            err.to_string().contains(
+                "model_providers.amazon-bedrock: provider auth.command must not be empty"
+            )
+        );
     }
 }

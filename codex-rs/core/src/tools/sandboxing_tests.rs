@@ -151,6 +151,7 @@ fn deny_read_blocks_explicit_escalation_and_policy_bypass() {
             pattern: "**/*.env".to_string(),
         },
         access: FileSystemAccessMode::Deny,
+        missing_path_behavior: None,
     }]);
 
     assert_eq!(
@@ -246,7 +247,7 @@ fn exec_server_env_keeps_command_native_and_carries_sandbox_context() {
         capture_policy: crate::exec::ExecCapturePolicy::ShellTool,
     };
     let request = attempt
-        .env_for_exec_server(command(), options(), /*network*/ None, Some("remote"))
+        .env_for_exec_server(command(), options())
         .expect("prepare remote exec request");
 
     assert_eq!(
@@ -265,8 +266,13 @@ fn exec_server_env_keeps_command_native_and_carries_sandbox_context() {
             permissions: exec_server_permissions.clone().into(),
             cwd: Some(cwd_uri.clone()),
             workspace_roots: vec![cwd_uri.clone()],
-            windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel::Disabled,
+            windows_sandbox_level: if cfg!(windows) {
+                codex_protocol::config_types::WindowsSandboxLevel::RestrictedToken
+            } else {
+                codex_protocol::config_types::WindowsSandboxLevel::Disabled
+            },
             windows_sandbox_private_desktop: false,
+            windows_sandbox_proxy_settings_mode: None,
             use_legacy_landlock: false,
         })
     );
@@ -278,7 +284,7 @@ fn exec_server_env_keeps_command_native_and_carries_sandbox_context() {
 
     attempt.sandbox_requested = false;
     let request = attempt
-        .env_for_exec_server(command(), options(), /*network*/ None, Some("remote"))
+        .env_for_exec_server(command(), options())
         .expect("prepare unsandboxed remote exec request");
 
     assert_eq!(request.exec_server_sandbox, None);

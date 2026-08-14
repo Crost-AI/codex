@@ -1,4 +1,6 @@
 use super::shared::v2_enum_from_core;
+use crate::JsonSchema;
+use crate::TS;
 use codex_protocol::approvals::ElicitationRequest as CoreElicitationRequest;
 use codex_protocol::items::McpToolCallError as CoreMcpToolCallError;
 use codex_protocol::mcp::CallToolResult as CoreMcpCallToolResult;
@@ -7,15 +9,14 @@ use codex_protocol::mcp::Resource as McpResource;
 pub use codex_protocol::mcp::ResourceContent as McpResourceContent;
 use codex_protocol::mcp::ResourceTemplate as McpResourceTemplate;
 use codex_protocol::mcp::Tool as McpTool;
-use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
-use ts_rs::TS;
 
 v2_enum_from_core!(
     pub enum McpAuthStatus from codex_protocol::protocol::McpAuthStatus {
+        Unknown,
         Unsupported,
         NotLoggedIn,
         BearerToken,
@@ -60,11 +61,20 @@ pub enum McpServerStatusDetail {
 #[ts(export_to = "v2/")]
 pub struct McpServerStatus {
     pub name: String,
+    pub plugin_id: Option<String>,
     pub server_info: Option<McpServerInfo>,
     pub tools: std::collections::HashMap<String, McpTool>,
     pub resources: Vec<McpResource>,
     pub resource_templates: Vec<McpResourceTemplate>,
     pub auth_status: McpAuthStatus,
+    /// Human-readable source of the winning server definition (e.g.
+    /// "config.toml (user)" or "plugin `acme`"). Null when unknown.
+    pub source: Option<String>,
+    /// Sources of same-name definitions that lost to the winning one.
+    pub overridden_sources: Vec<String>,
+    /// Whether the connected server declared the experimental `codex/channel`
+    /// capability. Null while the server has not (yet) initialized.
+    pub declares_channel_capability: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -194,12 +204,25 @@ pub struct McpServerOauthLoginParams {
     pub name: String,
     #[ts(optional = nullable)]
     pub thread_id: Option<String>,
+    /// Registration strategy for this login only; omission selects automatic discovery.
+    #[ts(optional = nullable)]
+    pub client_registration: Option<McpServerOauthClientRegistration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub scopes: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub timeout_secs: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum McpServerOauthClientRegistration {
+    #[default]
+    Auto,
+    Cimd,
+    Dcr,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -287,6 +310,7 @@ impl From<rmcp::model::ElicitationAction> for McpServerElicitationAction {
             rmcp::model::ElicitationAction::Accept => Self::Accept,
             rmcp::model::ElicitationAction::Decline => Self::Decline,
             rmcp::model::ElicitationAction::Cancel => Self::Cancel,
+            _ => Self::Cancel,
         }
     }
 }
@@ -344,8 +368,36 @@ pub enum McpElicitationObjectType {
 pub enum McpElicitationPrimitiveSchema {
     Enum(McpElicitationEnumSchema),
     String(McpElicitationStringSchema),
+    #[serde(serialize_with = "serialize_mcp_elicitation_number_schema")]
     Number(McpElicitationNumberSchema),
     Boolean(McpElicitationBooleanSchema),
+}
+
+fn serialize_mcp_elicitation_number_schema<S>(
+    schema: &McpElicitationNumberSchema,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if schema.type_ != McpElicitationNumberType::Integer {
+        return schema.serialize(serializer);
+    }
+
+    let mut value = serde_json::to_value(schema).map_err(serde::ser::Error::custom)?;
+    if let Some(object) = value.as_object_mut() {
+        for key in ["minimum", "maximum", "default"] {
+            if let Some(value) = object.get_mut(key)
+                && let Some(number) = value.as_f64()
+                && number.fract() == 0.0
+                && number >= i64::MIN as f64
+                && number < -(i64::MIN as f64)
+            {
+                *value = serde_json::Value::from(number as i64);
+            }
+        }
+    }
+    value.serialize(serializer)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -716,18 +768,16 @@ pub struct McpServerElicitationRequestResponse {
     pub meta: Option<JsonValue>,
 }
 
-impl From<McpServerElicitationRequestResponse> for rmcp::model::CreateElicitationResult {
+impl From<McpServerElicitationRequestResponse> for rmcp::model::ElicitResult {
     fn from(value: McpServerElicitationRequestResponse) -> Self {
-        Self {
-            action: value.action.into(),
-            content: value.content,
-            meta: None,
-        }
+        let mut result = Self::new(value.action.into());
+        result.content = value.content;
+        result
     }
 }
 
-impl From<rmcp::model::CreateElicitationResult> for McpServerElicitationRequestResponse {
-    fn from(value: rmcp::model::CreateElicitationResult) -> Self {
+impl From<rmcp::model::ElicitResult> for McpServerElicitationRequestResponse {
+    fn from(value: rmcp::model::ElicitResult) -> Self {
         Self {
             action: value.action.into(),
             content: value.content,

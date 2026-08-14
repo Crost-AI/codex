@@ -10,6 +10,7 @@ use codex_config::McpServerConfig;
 pub struct McpPluginAttribution {
     plugin_id: String,
     display_name: String,
+    agent_plugin: bool,
 }
 
 impl McpPluginAttribution {
@@ -17,6 +18,15 @@ impl McpPluginAttribution {
         Self {
             plugin_id,
             display_name,
+            agent_plugin: false,
+        }
+    }
+
+    pub fn agent_plugin(plugin_id: String, display_name: String) -> Self {
+        Self {
+            plugin_id,
+            display_name,
+            agent_plugin: true,
         }
     }
 
@@ -26,6 +36,10 @@ impl McpPluginAttribution {
 
     pub fn display_name(&self) -> &str {
         &self.display_name
+    }
+
+    pub fn is_agent_plugin(&self) -> bool {
+        self.agent_plugin
     }
 }
 
@@ -46,6 +60,15 @@ pub enum McpServerSource {
 }
 
 impl McpServerSource {
+    pub fn is_agent_plugin(&self) -> bool {
+        match self {
+            Self::Plugin(attribution) | Self::SelectedPlugin(attribution) => {
+                attribution.is_agent_plugin()
+            }
+            Self::Config | Self::Compatibility { .. } | Self::Extension { .. } => false,
+        }
+    }
+
     fn disabled_registration_is_name_veto(&self) -> bool {
         // A selected package's policy applies to its registration, not to a higher runtime source
         // that happens to use the same logical server name.
@@ -425,6 +448,21 @@ impl ResolvedMcpCatalog {
 
     pub fn conflicts(&self) -> &[McpServerConflict] {
         &self.conflicts
+    }
+
+    /// Returns the sources of every registration recorded for `name` in
+    /// ascending precedence order (the winning registration last). Removals
+    /// are excluded. Useful for showing which definition of a same-named
+    /// server won and which were overridden.
+    pub fn registration_sources_for(&self, name: &str) -> Vec<McpServerSource> {
+        self.actions
+            .iter()
+            .filter(|action| action.name() == name)
+            .filter_map(|action| match action {
+                CatalogAction::Register(registration) => Some(registration.source.clone()),
+                CatalogAction::Remove { .. } => None,
+            })
+            .collect()
     }
 }
 

@@ -53,6 +53,14 @@ impl ContextualUserFragment for TestFragment {
     }
 }
 
+#[test]
+fn world_state_hash_normalizes_crlf_line_endings() {
+    assert_eq!(
+        WorldStateHash::from_fragment(&TestFragment("line one\r\nline two".to_string())),
+        WorldStateHash::from_fragment(&TestFragment("line one\nline two".to_string())),
+    );
+}
+
 struct DuplicateTestSection;
 
 impl WorldStateSection for DuplicateTestSection {
@@ -250,19 +258,16 @@ fn snapshot_merge_patch_changes_and_removes_nested_values() {
     };
 
     assert_eq!(
-        current.merge_patch_from(&previous),
+        current.merge_patch_from(&previous).map(Value::Object),
         Some(json!({
             "kept": {"changed": "after", "removed": null},
             "removed_section": null,
         }))
     );
-    previous
-        .apply_merge_patch(
-            &current
-                .merge_patch_from(&previous)
-                .expect("changed snapshots should produce a patch"),
-        )
-        .expect("apply world-state merge patch");
+    let patch = current
+        .merge_patch_from(&previous)
+        .expect("changed snapshots should produce a patch");
+    previous.apply_merge_patch(&patch);
     assert_eq!(previous, current);
     assert_eq!(current.merge_patch_from(&current), None);
 }
