@@ -2762,6 +2762,7 @@ dependencies = [
  "codex-app-server-protocol",
  "codex-apply-patch",
  "codex-async-utils",
+ "codex-channels",
  "codex-client",
  "codex-code-mode",
  "codex-config",
@@ -2954,14 +2955,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codex-diagnostics"
-version = "0.0.0"
-dependencies = [
- "libc",
- "pretty_assertions",
-]
-
-[[package]]
 name = "codex-crost-memory-extension"
 version = "0.0.0"
 dependencies = [
@@ -2981,6 +2974,14 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "codex-diagnostics"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "pretty_assertions",
 ]
 
 [[package]]

@@ -117,7 +117,7 @@ fn runtime_for_turn(
         .find(|environment| environment.is_primary)
         .or_else(|| input.environments.first())
         .map(|environment| environment.cwd.clone())?;
-    match activate(&config.memory, &cwd, &config.outbox_root) {
+    match activate(&config.memory, cwd.to_path_buf().as_path(), &config.outbox_root) {
         Ok(next) => {
             let runtime = next.runtime();
             thread_store.insert(next);
@@ -170,6 +170,7 @@ where
     fn contribute<'a>(
         &'a self,
         input: TurnInputContext,
+        _extension_metrics: Option<std::sync::Arc<dyn codex_extension_api::ExtensionMetrics>>,
         _session_store: &'a ExtensionData,
         thread_store: &'a ExtensionData,
         turn_store: &'a ExtensionData,

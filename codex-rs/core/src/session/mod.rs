@@ -3377,7 +3377,7 @@ impl Session {
                 session_configuration.collaboration_mode.model().to_string(),
                 session_configuration.cwd().display().to_string(),
                 session_configuration.approval_policy.value().to_string(),
-                format!("{:?}", session_configuration.sandbox_policy()),
+                format!("{:?}", session_configuration.sandbox_policy(&[])),
             )
         };
         format!(

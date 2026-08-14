@@ -583,6 +583,7 @@ fn refine_config_layer_sources(
 
 fn config_layer_label(source: &codex_config::ConfigLayerSource) -> String {
     match source {
+        codex_config::ConfigLayerSource::PackagedDefaults { .. } => "packaged defaults".to_string(),
         codex_config::ConfigLayerSource::Mdm { .. } => "managed preferences (MDM)".to_string(),
         codex_config::ConfigLayerSource::System { .. } => "system config".to_string(),
         codex_config::ConfigLayerSource::EnterpriseManaged { .. } => {

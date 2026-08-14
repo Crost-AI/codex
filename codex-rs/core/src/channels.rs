@@ -314,7 +314,7 @@ impl Session {
         }];
         self.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
             .await;
-        self.start_task(turn_context, input, RegularTask::new())
+        self.start_task(turn_context, input, RegularTask::new(), crate::tasks::MailboxParentProvenance::Ignore)
             .await;
     }
 
