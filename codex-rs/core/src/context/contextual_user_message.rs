@@ -21,6 +21,7 @@ const CONTEXTUAL_USER_FRAGMENT_MATCHERS: &[fn(&str) -> bool] = &[
     EnvironmentsState::matches_text,
     AdditionalContextUserFragment::matches_text,
     codex_skills_extension::is_skill_prompt_fragment,
+    is_crost_memory_fragment,
     UserShellCommand::matches_text,
     TurnAborted::matches_text,
     SubagentNotification::matches_text,
@@ -30,6 +31,10 @@ const CONTEXTUAL_USER_FRAGMENT_MATCHERS: &[fn(&str) -> bool] = &[
     LegacyApplyPatchExecCommandWarning::matches_text,
     LegacyModelMismatchWarning::matches_text,
 ];
+
+fn is_crost_memory_fragment(text: &str) -> bool {
+    text.starts_with("<crost-memory")
+}
 
 /// Uses host annotations rather than text markers to identify user authorization changes.
 pub(crate) fn is_user_authorization_message(item: &ResponseItem) -> bool {

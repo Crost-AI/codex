@@ -32,6 +32,10 @@ impl ChannelWiring {
         }
     }
 
+    pub(crate) fn listens_for(&self, server_name: &str) -> bool {
+        self.active_servers.contains(server_name)
+    }
+
     /// Builds the custom-notification handler for one server, or `None` when
     /// the server is not opted in as a channel this session.
     pub(crate) fn handler_for(&self, server_name: &str) -> Option<CustomNotificationHandler> {
@@ -44,21 +48,28 @@ impl ChannelWiring {
             let sink = Arc::clone(&sink);
             let server_name = server_name.clone();
             async move {
-                if notification.method != codex_channels::CHANNEL_NOTIFICATION_METHOD {
-                    debug!(
-                        "ignoring unknown custom notification `{}` from MCP server `{server_name}`",
-                        notification.method
-                    );
-                    return;
-                }
-                // Malformed events are dropped silently per the channel protocol.
-                let Some(event) =
-                    ChannelEvent::parse_notification_params(notification.params.as_ref())
-                else {
-                    debug!("dropping malformed channel event from MCP server `{server_name}`");
-                    return;
-                };
-                sink(server_name, event).await;
+                // Delivery (including `/status` tool replies) must not run on
+                // the RMCP service task: that task has to keep reading the
+                // JSON-RPC response to `send_message`. Spawn and return.
+                tokio::spawn(async move {
+                    if notification.method != codex_channels::CHANNEL_NOTIFICATION_METHOD {
+                        debug!(
+                            "ignoring unknown custom notification `{}` from MCP server `{server_name}`",
+                            notification.method
+                        );
+                        return;
+                    }
+                    // Malformed events are dropped silently per the channel protocol.
+                    let Some(event) =
+                        ChannelEvent::parse_notification_params(notification.params.as_ref())
+                    else {
+                        debug!(
+                            "dropping malformed channel event from MCP server `{server_name}`"
+                        );
+                        return;
+                    };
+                    sink(server_name, event).await;
+                });
             }
             .boxed()
         }))

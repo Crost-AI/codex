@@ -392,6 +392,11 @@ impl McpConnectionSet {
                 previous
                     .and_then(|previous| previous.servers.get(&server_name))
                     .and_then(|view| view.connection.identity.as_ref()),
+            )
+            .with_channel_listener(
+                channel_wiring
+                    .as_ref()
+                    .is_some_and(|wiring| wiring.listens_for(&server_name)),
             );
             let expected_protocol_mode = match &configured_config.transport {
                 McpServerTransportConfig::StreamableHttp { .. } => Some(protocol_mode),

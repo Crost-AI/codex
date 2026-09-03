@@ -31,6 +31,9 @@ fn mcp_inventory_connection_states() {
         resources: Vec::new(),
         resource_templates: Vec::new(),
         auth_status: McpAuthStatus::Unknown,
+        source: None,
+        overridden_sources: Vec::new(),
+        declares_channel_capability: None,
     })
     .collect::<Vec<_>>();
     let cell =

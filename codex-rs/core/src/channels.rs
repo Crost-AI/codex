@@ -458,15 +458,29 @@ pub(crate) fn apply_channel_env_overlay(
             continue;
         };
         let env_path = codex_home.join("channels").join(server_name).join(".env");
-        let Ok(contents) = std::fs::read_to_string(&env_path) else {
-            continue;
-        };
-        let mut merged = codex_channels::parse_dotenv(&contents);
-        if merged.is_empty() {
-            continue;
-        }
+        let mut merged = std::fs::read_to_string(&env_path)
+            .map(|contents| codex_channels::parse_dotenv(&contents))
+            .unwrap_or_default();
+        let config_had_namespaces = env
+            .as_ref()
+            .is_some_and(|variables| variables.contains_key("CHANNEL_NAMESPACES"));
+        let config_had_env_file = env
+            .as_ref()
+            .is_some_and(|variables| variables.contains_key("CHANNEL_ENV_FILE"));
         if let Some(env) = env {
             merged.extend(env.clone());
+        }
+        if !config_had_namespaces {
+            merged.insert("CHANNEL_NAMESPACES".to_string(), "codex".to_string());
+        }
+        if !config_had_env_file {
+            merged.insert(
+                "CHANNEL_ENV_FILE".to_string(),
+                env_path.to_string_lossy().into_owned(),
+            );
+        }
+        if merged.is_empty() {
+            continue;
         }
         let mut overlaid = config.clone();
         overlaid.transport = McpServerTransportConfig::Stdio {

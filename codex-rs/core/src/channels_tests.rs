@@ -93,6 +93,11 @@ fn env_overlay_applies_only_to_active_stdio_servers() {
         Some(HashMap::from([
             ("DISCORD_BOT_TOKEN".to_string(), "from-dotenv".to_string()),
             ("EXTRA".to_string(), "1".to_string()),
+            ("CHANNEL_NAMESPACES".to_string(), "codex".to_string()),
+            (
+                "CHANNEL_ENV_FILE".to_string(),
+                discord_dir.join(".env").to_string_lossy().into_owned()
+            ),
         ]))
     );
     // Non-active servers never receive channel credentials.
@@ -128,12 +133,17 @@ fn env_overlay_lets_explicit_config_env_win() {
         Some(HashMap::from([
             ("DISCORD_BOT_TOKEN".to_string(), "from-config".to_string()),
             ("ONLY_IN_DOTENV".to_string(), "yes".to_string()),
+            ("CHANNEL_NAMESPACES".to_string(), "codex".to_string()),
+            (
+                "CHANNEL_ENV_FILE".to_string(),
+                discord_dir.join(".env").to_string_lossy().into_owned()
+            ),
         ]))
     );
 }
 
 #[test]
-fn env_overlay_missing_dotenv_leaves_config_untouched() {
+fn env_overlay_missing_dotenv_still_injects_host_defaults() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let mut servers = HashMap::from([("discord".to_string(), stdio_server(None))]);
     apply_channel_env_overlay(
@@ -141,5 +151,20 @@ fn env_overlay_missing_dotenv_leaves_config_untouched() {
         &BTreeSet::from(["discord".to_string()]),
         codex_home.path(),
     );
-    assert_eq!(server_env(&servers["discord"]), None);
+    assert_eq!(
+        server_env(&servers["discord"]),
+        Some(HashMap::from([
+            ("CHANNEL_NAMESPACES".to_string(), "codex".to_string()),
+            (
+                "CHANNEL_ENV_FILE".to_string(),
+                codex_home
+                    .path()
+                    .join("channels")
+                    .join("discord")
+                    .join(".env")
+                    .to_string_lossy()
+                    .into_owned()
+            ),
+        ]))
+    );
 }

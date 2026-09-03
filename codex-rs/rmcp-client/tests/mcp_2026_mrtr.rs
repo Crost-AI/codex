@@ -166,6 +166,7 @@ async fn create_client(
                 }
                 .boxed()
             }),
+            /*custom_notification_handler*/ None,
         )
         .await?;
     Ok(client)

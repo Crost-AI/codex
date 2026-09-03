@@ -12,11 +12,34 @@ use crate::identity::DEFAULT_PROJECT_FILE;
 /// Environment variable that overrides the configured agent id.
 pub const AGENT_ID_ENV: &str = "CROST_AGENT_ID";
 
-/// Default agent id for this fork.
+/// Seat-file name used on crost-9950 (`~/.config/hindsight/env`).
+pub const AGENT_ID_ENV_HINDSIGHT: &str = "HINDSIGHT_AGENT_ID";
+
+/// Environment variable that supplies the Hindsight base URL.
+pub const BASE_URL_ENV: &str = "HINDSIGHT_BASE_URL";
+
+/// Alternate environment variable for the Hindsight base URL.
+pub const BASE_URL_ENV_ALT: &str = "CROST_MEMORY_BASE_URL";
+
+/// Infisical / seat-file name for the Hindsight *agent API* (`Crost` / prod).
+/// Not `HINDSIGHT_API_LLM_BASE_URL` (OpenRouter) and not the UI host.
+pub const BASE_URL_ENV_INFISICAL: &str = "HINDSIGHT_API_URL";
+
+/// Default agent id for this Codex fork. Private bank is
+/// `{bankPrefix}--codex-private`. Grok/Claude seats set `CROST_AGENT_ID` /
+/// `HINDSIGHT_AGENT_ID` to `grok` / `claude` so they hit their own banks.
 pub const DEFAULT_AGENT_ID: &str = "codex";
 
 /// Default environment variable holding the Hindsight API key.
+/// Live seats set this (and `HINDSIGHT_API_TOKEN`) to the agent API token.
 pub const DEFAULT_API_KEY_ENV: &str = "HINDSIGHT_API_KEY";
+
+/// Infisical name for the Hindsight agent API token (`Crost` / prod).
+pub const API_TOKEN_ENV_INFISICAL: &str = "HINDSIGHT_API_TOKEN";
+
+/// Infisical tenant-key fallback. Never use `HINDSIGHT_CP_ACCESS_KEY` or
+/// `HINDSIGHT_UI_ACCESS_KEY` here — those are the browser UI keys.
+pub const API_TENANT_KEY_ENV_INFISICAL: &str = "HINDSIGHT_API_TENANT_API_KEY";
 
 /// Backing implementation used to talk to memory storage.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -78,13 +101,40 @@ impl Default for CrostMemoryConfig {
 }
 
 impl CrostMemoryConfig {
-    /// Applies `CROST_AGENT_ID` when it is set to a non-empty value.
+    /// Applies seat / Infisical Hindsight settings.
+    ///
+    /// Agent id selects the private bank (`{prefix}--{agent}-private`).
+    /// Codex defaults to `codex`; live Grok/Claude seats export
+    /// `CROST_AGENT_ID` / `HINDSIGHT_AGENT_ID`.
     #[must_use]
-    pub fn with_env_overrides(mut self) -> Self {
-        if let Ok(agent_id) = std::env::var(AGENT_ID_ENV) {
-            let agent_id = agent_id.trim();
-            if !agent_id.is_empty() {
-                self.agent_id = agent_id.to_string();
+    pub fn with_env_overrides(self) -> Self {
+        self.with_env_lookup(|name| std::env::var(name).ok())
+    }
+
+    fn with_env_lookup(mut self, lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let nonempty = |name: &str| {
+            lookup(name).and_then(|value| {
+                let value = value.trim();
+                (!value.is_empty()).then(|| value.to_string())
+            })
+        };
+        if let Some(agent_id) = nonempty(AGENT_ID_ENV).or_else(|| nonempty(AGENT_ID_ENV_HINDSIGHT))
+        {
+            self.agent_id = agent_id;
+        }
+        for key in [BASE_URL_ENV, BASE_URL_ENV_ALT, BASE_URL_ENV_INFISICAL] {
+            if let Some(url) = nonempty(key) {
+                self.base_url = Some(url);
+                self.enabled = true;
+                break;
+            }
+        }
+        if nonempty(&self.api_key_env).is_none() {
+            for key in [API_TOKEN_ENV_INFISICAL, API_TENANT_KEY_ENV_INFISICAL] {
+                if nonempty(key).is_some() {
+                    self.api_key_env = key.to_string();
+                    break;
+                }
             }
         }
         self
@@ -185,5 +235,57 @@ mod tests {
         assert_eq!(token.expose(), Some("hs-super-secret-value"));
         assert_eq!(format!("{:?}", ApiToken::new(None)), "ApiToken(unset)");
         assert!(!ApiToken::new(Some("   ".to_string())).is_present());
+    }
+
+    #[test]
+    fn crost_agent_id_wins_over_hindsight_agent_id() {
+        let config = CrostMemoryConfig::default().with_env_lookup(|name| match name {
+            AGENT_ID_ENV => Some("codex".to_string()),
+            AGENT_ID_ENV_HINDSIGHT => Some("grok".to_string()),
+            _ => None,
+        });
+        assert_eq!(config.agent_id, "codex");
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn hindsight_agent_id_selects_the_grok_or_claude_private_bank() {
+        let grok = CrostMemoryConfig::default().with_env_lookup(|name| match name {
+            AGENT_ID_ENV_HINDSIGHT => Some("grok".to_string()),
+            BASE_URL_ENV_INFISICAL => Some("http://127.0.0.1:8888".to_string()),
+            _ => None,
+        });
+        assert_eq!(grok.agent_id, "grok");
+        assert!(grok.enabled);
+        assert_eq!(grok.base_url.as_deref(), Some("http://127.0.0.1:8888"));
+
+        let claude = CrostMemoryConfig::default().with_env_lookup(|name| match name {
+            AGENT_ID_ENV => Some("claude".to_string()),
+            _ => None,
+        });
+        assert_eq!(claude.agent_id, "claude");
+    }
+
+    #[test]
+    fn llm_and_ui_hindsight_keys_do_not_enable_the_agent_api() {
+        let config = CrostMemoryConfig::default().with_env_lookup(|name| match name {
+            "HINDSIGHT_API_LLM_BASE_URL" => Some("https://openrouter.ai/api".to_string()),
+            "HINDSIGHT_CP_ACCESS_KEY" => Some("ui-key".to_string()),
+            "HINDSIGHT_UI_ACCESS_KEY" => Some("ui-key".to_string()),
+            _ => None,
+        });
+        assert!(!config.enabled);
+        assert_eq!(config.base_url, None);
+        assert_eq!(config.api_key_env, DEFAULT_API_KEY_ENV);
+    }
+
+    #[test]
+    fn infisical_agent_token_is_used_when_api_key_is_absent() {
+        let config = CrostMemoryConfig::default().with_env_lookup(|name| match name {
+            API_TOKEN_ENV_INFISICAL => Some("hs-token".to_string()),
+            API_TENANT_KEY_ENV_INFISICAL => Some("hs-tenant".to_string()),
+            _ => None,
+        });
+        assert_eq!(config.api_key_env, API_TOKEN_ENV_INFISICAL);
     }
 }

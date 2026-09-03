@@ -105,6 +105,26 @@ where
         thread_manager,
     );
     codex_memories_extension::install(&mut builder, codex_otel::global());
+    codex_crost_memory_extension::install(&mut builder, |config: &Config| {
+        let memory = codex_crost_memory_extension::CrostMemoryConfig::default()
+            .with_env_overrides();
+        // Stay disabled unless a Hindsight endpoint is actually configured.
+        // Force-enabling with `base_url: None` makes every real workspace
+        // `ProviderUnavailable`, and descriptor-less threads would re-walk
+        // the filesystem on every turn.
+        let enabled = memory.enabled && memory.base_url.is_some();
+        let mut memory = memory;
+        memory.enabled = enabled;
+        codex_crost_memory_extension::CrostMemoryExtensionConfig {
+            memory,
+            cwd: config.cwd.as_ref().to_path_buf(),
+            outbox_root: config
+                .codex_home
+                .as_ref()
+                .join("crost-memory")
+                .join("outbox"),
+        }
+    });
     codex_mcp_extension::install(&mut builder);
     codex_mcp_extension::install_executor_plugins(&mut builder, environment_manager);
     codex_web_search_extension::install(&mut builder, auth_manager.clone());

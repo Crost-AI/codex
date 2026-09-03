@@ -125,6 +125,9 @@ fn runtime_for_turn(
         }
         Err(DisabledReason::NoProjectIdentity(detail)) => {
             tracing::debug!(detail, "crost memory stays inactive: no project identity");
+            thread_store.insert(CrostMemoryThreadState::Disabled(
+                DisabledReason::NoProjectIdentity(detail),
+            ));
             None
         }
         Err(reason) => {
@@ -234,9 +237,7 @@ where
         Box::pin(async move {
             let enabled = thread_store
                 .get::<CrostMemoryThreadState>()
-                .is_some_and(|state| {
-                    !matches!(state.as_ref(), CrostMemoryThreadState::Disabled(_))
-                });
+                .is_some_and(|state| state.runtime().is_some());
             if !enabled {
                 return Ok(());
             }

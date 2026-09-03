@@ -113,10 +113,11 @@ pub async fn run_recall(
         if content.is_empty() {
             continue;
         }
-        if !item.id.is_empty() && !seen_ids.insert(item.id.clone()) {
+        let body_hash = content_hash(&content);
+        if !item.id.is_empty() && seen_ids.contains(&item.id) {
             continue;
         }
-        if !seen_bodies.insert(content_hash(&content)) {
+        if seen_bodies.contains(&body_hash) {
             continue;
         }
         let cost = estimate_tokens(&content);
@@ -127,9 +128,13 @@ pub async fn run_recall(
         if selected.len() >= config.recall_max_items {
             continue;
         }
-        if !selected.is_empty() && *tokens + cost > config.token_budget(scope) {
+        if *tokens + cost > config.token_budget(scope) {
             continue;
         }
+        if !item.id.is_empty() {
+            seen_ids.insert(item.id.clone());
+        }
+        seen_bodies.insert(body_hash);
         *tokens += cost;
         injected_tokens += cost;
         selected.push(render_line(scope, &item, &content));

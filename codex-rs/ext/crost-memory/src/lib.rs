@@ -26,9 +26,11 @@ pub mod state;
 mod tools;
 pub mod types;
 
+pub use config::CrostMemoryConfig;
 pub use extension::CrostMemoryExtension;
 pub use extension::build_thread_state;
 pub use extension::install;
+pub use state::CrostMemoryExtensionConfig;
 
 /// Namespace of every tool this extension owns.
 pub const CROST_MEMORY_TOOLS_NAMESPACE: &str = "crost_memory";

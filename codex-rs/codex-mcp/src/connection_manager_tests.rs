@@ -430,6 +430,7 @@ async fn legacy_tool_catalog_does_not_follow_pagination_cursor() -> anyhow::Resu
             .with_protocol_version(ProtocolVersion::V_2025_06_18),
             Some(Duration::from_secs(5)),
             Box::new(|_, _| async { Err(anyhow!("unexpected elicitation")) }.boxed()),
+            /*custom_notification_handler*/ None,
         )
         .await?;
 
@@ -2009,6 +2010,7 @@ async fn codex_apps_extension_does_not_share_host_owned_tools_cache() -> anyhow:
             auth_manager: None,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
+            channel_wiring: None,
         },
         ElicitationRequestRouter::default(),
     )
@@ -4285,6 +4287,7 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
                 auth_manager: None,
                 elicitation_reviewer: None,
                 elicitation_lifecycle: None,
+                channel_wiring: None,
             },
             ElicitationRequestRouter::default(),
         )
@@ -5310,6 +5313,7 @@ async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
             auth_manager: None,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
+            channel_wiring: None,
         },
         ElicitationRequestRouter::default(),
     )
@@ -5368,6 +5372,7 @@ async fn reconciliation_reuses_legacy_stdio_server_when_modern_protocol_is_enabl
             auth_manager: None,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
+            channel_wiring: None,
         },
         ElicitationRequestRouter::default(),
     )

@@ -162,6 +162,15 @@ pub fn parse_project_identity(contents: &str) -> Result<ProjectIdentity, String>
     let Some(project_id) = project_id else {
         return Err("missing or empty `projectId`".to_string());
     };
+    if project_id == "."
+        || project_id == ".."
+        || project_id.contains('/')
+        || project_id.contains('\\')
+    {
+        return Err(format!(
+            "`projectId` value `{project_id}` must not be a path component"
+        ));
+    }
     let Some(slug) = slug else {
         return Err("missing `slug`".to_string());
     };

@@ -73,6 +73,7 @@ async fn initialize_client(client: &RmcpClient) -> anyhow::Result<ServerPeerInfo
                 }
                 .boxed()
             }),
+            /*custom_notification_handler*/ None,
         )
         .await
 }

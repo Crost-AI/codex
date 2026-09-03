@@ -2,9 +2,12 @@
 //!
 //! No real network is used: the fake provider backs every scenario.
 
+use std::marker::PhantomData;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use codex_utils_absolute_path::AbsolutePathBuf;
 
 use codex_extension_api::ConversationHistory;
 use codex_extension_api::ExtensionData;
@@ -12,6 +15,7 @@ use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::NoopTurnItemEmitter;
 use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ToolCall;
+use codex_extension_api::ToolCallSource;
 use codex_extension_api::ToolName;
 use codex_extension_api::ToolPayload;
 use codex_extension_api::TurnAbortInput;
@@ -23,6 +27,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::user_input::UserInput;
 use codex_utils_output_truncation::TruncationPolicy;
+use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
@@ -101,6 +106,7 @@ async fn start_thread(
                 persistent_thread_state_available: true,
                 environments: &[],
                 mcp_resource_client: None,
+                extension_metrics: None,
                 session_store,
                 thread_store,
             })
@@ -108,7 +114,9 @@ async fn start_thread(
     }
 }
 
-fn turn_input(cwd: &Path, text: &str) -> TurnInputContext {
+fn turn_input(cwd: &Path, text: &str) -> TurnInputContext<'static> {
+    let abs = AbsolutePathBuf::from_absolute_path(cwd)
+        .unwrap_or_else(|err| panic!("absolute cwd: {err}"));
     TurnInputContext {
         turn_id: "turn-1".to_string(),
         user_input: vec![UserInput::Text {
@@ -117,8 +125,9 @@ fn turn_input(cwd: &Path, text: &str) -> TurnInputContext {
         }],
         environments: vec![TurnInputEnvironment {
             environment_id: "local".to_string(),
-            cwd: cwd.to_path_buf(),
+            cwd: PathUri::from_abs_path(&abs),
             is_primary: true,
+            _lifetime: PhantomData,
         }],
     }
 }
@@ -193,7 +202,7 @@ fn promote_tool_name() -> ToolName {
     ToolName::namespaced(CROST_MEMORY_TOOLS_NAMESPACE, PROMOTE_TO_SHARED_TOOL_NAME)
 }
 
-fn tool_call(arguments: serde_json::Value) -> ToolCall {
+fn tool_call(arguments: serde_json::Value) -> ToolCall<'static> {
     ToolCall {
         turn_id: "turn-1".to_string(),
         call_id: "call-1".to_string(),
@@ -201,6 +210,7 @@ fn tool_call(arguments: serde_json::Value) -> ToolCall {
         model: "gpt-test".to_string(),
         codex_turn_metadata: None,
         truncation_policy: TruncationPolicy::Bytes(4096),
+        source: ToolCallSource::Direct,
         conversation_history: ConversationHistory::default(),
         turn_item_emitter: Arc::new(NoopTurnItemEmitter),
         environments: Vec::new(),
@@ -237,6 +247,7 @@ async fn recall_injects_exactly_one_fragment_per_turn() {
     let fragments = registry.turn_input_contributors()[0]
         .contribute(
             turn_input(workspace.path(), "Fix the checkout flow"),
+            None,
             &session_store,
             &thread_store,
             &turn_store,
@@ -267,6 +278,7 @@ async fn recall_injects_nothing_when_no_memories_exist() {
     let fragments = registry.turn_input_contributors()[0]
         .contribute(
             turn_input(workspace.path(), "Fix the checkout flow"),
+            None,
             &session_store,
             &thread_store,
             &turn_store,
@@ -292,6 +304,7 @@ async fn a_failing_provider_never_errors_the_turn() {
     let fragments = registry.turn_input_contributors()[0]
         .contribute(
             turn_input(workspace.path(), "Fix the checkout flow"),
+            None,
             &session_store,
             &thread_store,
             &turn_store,
@@ -321,6 +334,7 @@ async fn disabled_config_contributes_no_fragments_and_no_tools() {
     let fragments = registry.turn_input_contributors()[0]
         .contribute(
             turn_input(workspace.path(), "Fix the checkout flow"),
+            None,
             &session_store,
             &thread_store,
             &turn_store,
@@ -350,6 +364,7 @@ async fn a_workspace_without_a_descriptor_stays_inactive() {
     let fragments = registry.turn_input_contributors()[0]
         .contribute(
             turn_input(workspace.path(), "Fix the checkout flow"),
+            None,
             &session_store,
             &thread_store,
             &turn_store,
@@ -363,6 +378,27 @@ async fn a_workspace_without_a_descriptor_stays_inactive() {
 
     assert!(fragments.is_empty());
     assert!(tools.is_empty());
+
+    let fragments_again = registry.turn_input_contributors()[0]
+        .contribute(
+            turn_input(workspace.path(), "Fix the checkout flow again"),
+            None,
+            &session_store,
+            &thread_store,
+            &ExtensionData::new("turn-2"),
+        )
+        .await;
+    assert!(fragments_again.is_empty());
+    let state = thread_store
+        .get::<crate::state::CrostMemoryThreadState>()
+        .unwrap_or_else(|| panic!("thread state"));
+    assert!(
+        matches!(
+            state.as_ref(),
+            crate::state::CrostMemoryThreadState::Disabled(_)
+        ),
+        "descriptor-less workspaces must cache Disabled after the first miss, got {state:?}"
+    );
 }
 
 #[tokio::test]
@@ -391,6 +427,7 @@ async fn identity_resolves_lazily_from_the_turn_environment() {
     registry.turn_input_contributors()[0]
         .contribute(
             turn_input(workspace.path(), "Fix the checkout flow"),
+            None,
             &session_store,
             &thread_store,
             &turn_store,
@@ -428,6 +465,7 @@ async fn retention_builds_a_record_that_excludes_recalled_content() {
     let fragments = registry.turn_input_contributors()[0]
         .contribute(
             turn_input(workspace.path(), "Add the outbox\nwith backoff"),
+            None,
             &session_store,
             &thread_store,
             &turn_store,
@@ -489,7 +527,7 @@ async fn retention_builds_a_record_that_excludes_recalled_content() {
     let rendered = record.render();
     assert!(!rendered.contains("RECALLED-ONLY-MARKER"));
     assert!(!rendered.contains("<crost-memory"));
-    assert!(retained[0].op_id.starts_with("cm-"));
+    assert_eq!(retained[0].op_id.len(), 36);
 }
 
 #[tokio::test]
@@ -507,6 +545,7 @@ async fn secrets_are_redacted_before_retention() {
     registry.turn_input_contributors()[0]
         .contribute(
             turn_input(workspace.path(), "Rotate AKIAIOSFODNN7EXAMPLE"),
+            None,
             &session_store,
             &thread_store,
             &turn_store,
@@ -553,6 +592,7 @@ async fn aborted_turns_retain_nothing() {
     registry.turn_input_contributors()[0]
         .contribute(
             turn_input(workspace.path(), "Add the outbox"),
+            None,
             &session_store,
             &thread_store,
             &turn_store,
@@ -826,6 +866,7 @@ async fn retention_can_be_disabled_independently() {
     registry.turn_input_contributors()[0]
         .contribute(
             turn_input(workspace.path(), "Add the outbox"),
+            None,
             &session_store,
             &thread_store,
             &turn_store,

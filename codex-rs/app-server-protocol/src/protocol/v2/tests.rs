@@ -2637,6 +2637,9 @@ fn mcp_server_status_accepts_older_inventory_without_runtime_status() {
             resources: Vec::new(),
             resource_templates: Vec::new(),
             auth_status: McpAuthStatus::Unknown,
+            source: None,
+            overridden_sources: Vec::new(),
+            declares_channel_capability: None,
         }
     );
 }

@@ -353,7 +353,7 @@ impl Session {
             .environment_cwds
             .entry(codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string())
             .or_insert_with(|| PathUri::from_abs_path(&desired.config.cwd));
-        let mcp_servers = effective_mcp_servers(&config, auth.as_ref());
+        let mut mcp_servers = effective_mcp_servers(&config, auth.as_ref());
         config.set_server_permission_profiles(
             &mcp_servers,
             desired.environments.turn_environments().map(|environment| {
@@ -364,7 +364,6 @@ impl Session {
             }),
         );
         let mcp_config = Arc::new(config);
-        let mut mcp_servers = effective_mcp_servers(&mcp_config, auth.as_ref());
         // Channels: resolve this thread's opt-ins against the server set,
         // overlay `~/.codex/channels/<server>/.env` credentials onto the
         // opted-in stdio servers BEFORE they are spawned, and build the

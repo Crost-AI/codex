@@ -124,7 +124,8 @@ async fn local_stdio_inherits_ca_certificate_variables_child() -> anyhow::Result
                     }
                     .boxed()
                 }),
-            )
+            /*custom_notification_handler*/ None,
+        )
             .await?;
         let result = client
             .call_tool(
@@ -188,7 +189,8 @@ async fn modern_local_and_executor_stdio_discover_metadata_identity_and_catalogs
                     }
                     .boxed()
                 }),
-            )
+            /*custom_notification_handler*/ None,
+        )
             .await?;
 
         let tools = client
@@ -256,7 +258,8 @@ async fn legacy_stdio_preserves_existing_protocol_marker_environment() -> anyhow
                         }
                         .boxed()
                     }),
-                )
+            /*custom_notification_handler*/ None,
+        )
                 .await?;
 
             let result = client

@@ -118,7 +118,8 @@ async fn stdio_message_limits_preserve_legacy_local_compatibility() -> anyhow::R
                     }
                     .boxed()
                 }),
-            )
+            /*custom_notification_handler*/ None,
+        )
             .await?;
 
         let result = client
@@ -193,7 +194,8 @@ async fn local_stdio_shutdown_terminates_descendants_after_server_exit() -> anyh
                     }
                     .boxed()
                 }),
-            )
+            /*custom_notification_handler*/ None,
+        )
             .await?;
 
         assert_eq!(

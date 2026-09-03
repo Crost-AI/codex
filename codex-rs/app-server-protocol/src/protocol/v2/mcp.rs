@@ -86,6 +86,7 @@ pub struct McpServerStatus {
     /// "config.toml (user)" or "plugin `acme`"). Null when unknown.
     pub source: Option<String>,
     /// Sources of same-name definitions that lost to the winning one.
+    #[serde(default)]
     pub overridden_sources: Vec<String>,
     /// Whether the connected server declared the experimental `codex/channel`
     /// capability. Null while the server has not (yet) initialized.

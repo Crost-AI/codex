@@ -112,6 +112,9 @@ pub(crate) struct McpServerConnectionIdentity {
     client_elicitation_capability: ElicitationCapability,
     client_mcp_extensions: ClientMcpExtensions,
     agent_plugin: bool,
+    /// Whether this connection was started with a channel notification listener.
+    /// Changing this without reconnecting would drop or miss inbound events.
+    channel_listener: bool,
 }
 
 impl McpServerConnectionIdentity {
@@ -232,7 +235,13 @@ impl McpServerConnectionIdentity {
             client_elicitation_capability,
             client_mcp_extensions,
             agent_plugin: server.is_agent_plugin(),
+            channel_listener: false,
         }
+    }
+
+    pub(crate) fn with_channel_listener(mut self, channel_listener: bool) -> Self {
+        self.channel_listener = channel_listener;
+        self
     }
 
     pub(crate) fn has_same_connection_config(&self, other: &Self) -> bool {
@@ -264,6 +273,7 @@ impl McpServerConnectionIdentity {
             && self.client_elicitation_capability == other.client_elicitation_capability
             && self.client_mcp_extensions == other.client_mcp_extensions
             && self.agent_plugin == other.agent_plugin
+            && self.channel_listener == other.channel_listener
     }
 
     pub(crate) fn oauth_credentials(&self) -> Result<Option<&StoredOAuthTokens>, &String> {

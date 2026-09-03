@@ -178,6 +178,7 @@ impl Fixture {
             auth_manager: Some(Arc::clone(&auth)),
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
+            channel_wiring: None,
         };
         let runtime = Arc::new(McpRuntime::new(runtime_input()).await);
         let runtime_input = runtime_input();

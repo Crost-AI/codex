@@ -28,7 +28,9 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+codex-utils-absolute-path = { workspace = true }
 codex-utils-output-truncation = { workspace = true }
+codex-utils-path-uri = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

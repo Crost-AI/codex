@@ -1885,6 +1885,8 @@ impl Session {
             config.mcp_servers = next_config.mcp_servers.clone();
             config.mcp_optional_startup_grace = next_config.mcp_optional_startup_grace;
             config.mcp_oauth_credentials_store_mode = next_config.mcp_oauth_credentials_store_mode;
+            config.channels_entries = next_config.channels_entries.clone();
+            config.channels_policy = next_config.channels_policy.clone();
             if let Err(err) = config.features.set_enabled(
                 Feature::SecretAuthStorage,
                 next_config.features.enabled(Feature::SecretAuthStorage),
@@ -1901,6 +1903,12 @@ impl Session {
             }
             let config = Arc::new(config);
             state.session_configuration.original_config_do_not_use = Arc::clone(&config);
+            if !matches!(
+                state.session_configuration.session_source,
+                SessionSource::SubAgent(_) | SessionSource::Internal(_)
+            ) {
+                self.services.channel_hub.configure(&config);
+            }
             self.mark_mcp_runtime_dirty();
             let new_config = notify_config_contributors
                 .then(|| self.build_effective_session_config(&state.session_configuration));

@@ -60,6 +60,7 @@ async fn initialize(client: &RmcpClient) -> anyhow::Result<()> {
                 }
                 .boxed()
             }),
+            /*custom_notification_handler*/ None,
         )
         .await?;
     Ok(())

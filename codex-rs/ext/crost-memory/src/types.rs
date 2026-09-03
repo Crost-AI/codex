@@ -236,8 +236,20 @@ pub struct ProviderStatus {
 /// Callers must compute this ONCE per logical operation and store it with the
 /// operation; retries reuse the same value so the server can dedupe.
 pub fn new_op_id() -> String {
+    // Hindsight validates `operation_id` as an RFC 4122 UUID.
     let bits: u128 = rand::rng().random();
-    format!("cm-{bits:032x}")
+    let hex = format!("{bits:032x}");
+    format!(
+        "{}-{}-4{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[13..16],
+        {
+            let nibble = u8::from_str_radix(&hex[16..17], 16).unwrap_or(0);
+            format!("{:x}{}", (nibble & 0x3) | 0x8, &hex[17..20])
+        },
+        &hex[20..32]
+    )
 }
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
@@ -335,9 +347,11 @@ mod tests {
         let first = new_op_id();
         let second = new_op_id();
 
-        assert!(first.starts_with("cm-"));
-        assert_eq!(first.len(), 35);
-        assert!(first[3..].chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(first.len(), 36);
+        assert_eq!(&first[14..15], "4");
+        let hex: String = first.chars().filter(|c| *c != '-').collect();
+        assert_eq!(hex.len(), 32);
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(first, second);
     }
 

@@ -82,6 +82,10 @@ impl HindsightProvider {
     }
 
     /// Bank name for one scope.
+    ///
+    /// Crost contract (`MEMORY-BANKS.md`): `{prefix}--shared` plus one
+    /// private bank per CLI (`{prefix}--codex-private`, `--grok-private`,
+    /// `--claude-private`). `agent_id` is what selects the private bank.
     pub fn bank_name(&self, scope: RecallScope) -> String {
         let prefix = &self.bank_prefix;
         match scope {
@@ -404,6 +408,33 @@ mod tests {
             provider.bank_name(RecallScope::Private),
             "crost--ohm-storefront--codex-private"
         );
+    }
+
+    #[test]
+    fn each_cli_reports_to_its_own_private_bank() {
+        for (agent, expected) in [
+            ("codex", "crost--ohm-storefront--codex-private"),
+            ("grok", "crost--ohm-storefront--grok-private"),
+            ("claude", "crost--ohm-storefront--claude-private"),
+        ] {
+            let config = CrostMemoryConfig {
+                base_url: Some("https://hindsight.example/".to_string()),
+                agent_id: agent.to_string(),
+                ..CrostMemoryConfig::default()
+            };
+            let identity = ProjectIdentity {
+                project_id: "p1".to_string(),
+                slug: "ohm-storefront".to_string(),
+                bank_prefix: None,
+            };
+            let provider =
+                HindsightProvider::new(&config, &identity).unwrap_or_else(|err| panic!("{err}"));
+            assert_eq!(provider.bank_name(RecallScope::Private), expected);
+            assert_eq!(
+                provider.bank_name(RecallScope::Shared),
+                "crost--ohm-storefront--shared"
+            );
+        }
     }
 
     #[test]

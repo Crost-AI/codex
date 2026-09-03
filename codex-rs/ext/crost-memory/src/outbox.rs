@@ -281,7 +281,7 @@ fn sanitize_component(value: &str) -> String {
             }
         })
         .collect::<String>();
-    if sanitized.is_empty() {
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
         "unknown".to_string()
     } else {
         sanitized
