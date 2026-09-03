@@ -1,5 +1,6 @@
 //! The single contextual fragment this extension injects.
 
+use codex_extension_api::ContentItemKind;
 use codex_extension_api::ContextualUserFragment;
 
 use crate::recall::CROST_MEMORY_CLOSE_TAG;
@@ -38,6 +39,10 @@ impl CrostMemoryFragment {
 impl ContextualUserFragment for CrostMemoryFragment {
     fn role(&self) -> &'static str {
         "user"
+    }
+
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("crost_memory.recall".to_string())
     }
 
     fn markers(&self) -> (&'static str, &'static str) {

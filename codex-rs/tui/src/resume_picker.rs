@@ -5,13 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::app_server_session::AppServerSession;
-use crate::app_server_session::HISTORY_ITEM_PAGE_LIMIT;
-use crate::app_server_session::HISTORY_ITEM_SCAN_LIMIT;
 use crate::clipboard_paste::normalize_pasted_search_query;
 use crate::color::blend;
 use crate::color::is_light;
-use crate::git_action_directives::parse_assistant_markdown;
-use crate::inline_visualization::InlineVisualizationContext;
 use crate::key_hint::KeyBindingListExt;
 use crate::key_hint::is_plain_text_key_event;
 use crate::keymap::ListAction;
@@ -45,7 +41,6 @@ use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadArchiveParams;
 use codex_app_server_protocol::ThreadArchiveResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
-use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadListCwdFilter;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadSortKey;
@@ -85,6 +80,11 @@ mod page_loading;
 use page_loading::PageLoadMode;
 use page_loading::PaginationState;
 
+#[path = "resume_picker_transcript_preview.rs"]
+mod transcript_preview;
+
+pub(crate) use transcript_preview::load_transcript_preview;
+
 const PAGE_SIZE: usize = 25;
 const LOAD_NEAR_THRESHOLD: usize = 5;
 const SESSION_META_INDENT_WIDTH: usize = 2;
@@ -104,6 +104,8 @@ const PICKER_LIST_HORIZONTAL_INSET: u16 = 4;
 pub struct SessionTarget {
     pub path: Option<PathBuf>,
     pub thread_id: ThreadId,
+    /// History mode observed during selection, if the server provided one.
+    pub history_mode: Option<ThreadHistoryMode>,
 }
 
 impl SessionTarget {
@@ -118,6 +120,7 @@ impl SessionTarget {
 #[derive(Debug, Clone)]
 pub enum SessionSelection {
     StartFresh,
+    AgentsOverview,
     Resume(SessionTarget),
     Fork(SessionTarget),
     Exit,
@@ -150,8 +153,7 @@ impl SessionPickerAction {
         }
     }
 
-    fn selection(self, path: Option<PathBuf>, thread_id: ThreadId) -> SessionSelection {
-        let target_session = SessionTarget { path, thread_id };
+    fn selection(self, target_session: SessionTarget) -> SessionSelection {
         match self {
             SessionPickerAction::Resume => SessionSelection::Resume(target_session),
             SessionPickerAction::Fork => SessionSelection::Fork(target_session),
@@ -315,6 +317,7 @@ enum PageCursor {
 
 struct PickerPage {
     rows: Vec<Row>,
+    history_modes: HashMap<ThreadId, ThreadHistoryMode>,
     next_cursor: Option<PageCursor>,
     num_scanned_files: usize,
     reached_scan_cap: bool,
@@ -359,6 +362,7 @@ struct SessionPickerRunOptions {
 pub async fn run_resume_picker_with_app_server(
     tui: &mut Tui,
     config: &Config,
+    local_settings: &crate::local_settings::LocalSettings,
     show_all: bool,
     include_non_interactive: bool,
     app_server: AppServerSession,
@@ -367,6 +371,7 @@ pub async fn run_resume_picker_with_app_server(
     run_resume_picker_with_launch_context(
         tui,
         config,
+        local_settings,
         show_all,
         include_non_interactive,
         app_server,
@@ -376,9 +381,14 @@ pub async fn run_resume_picker_with_app_server(
     .await
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "keep local preferences separate while the legacy Config parameter is still required"
+)]
 pub async fn run_resume_picker_from_existing_session_with_app_server(
     tui: &mut Tui,
     config: &Config,
+    local_settings: &crate::local_settings::LocalSettings,
     show_all: bool,
     include_non_interactive: bool,
     app_server: AppServerSession,
@@ -388,6 +398,7 @@ pub async fn run_resume_picker_from_existing_session_with_app_server(
     run_resume_picker_with_launch_context(
         tui,
         config,
+        local_settings,
         show_all,
         include_non_interactive,
         app_server,
@@ -397,9 +408,14 @@ pub async fn run_resume_picker_from_existing_session_with_app_server(
     .await
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "keep local preferences separate while the legacy Config parameter is still required"
+)]
 async fn run_resume_picker_with_launch_context(
     tui: &mut Tui,
     config: &Config,
+    local_settings: &crate::local_settings::LocalSettings,
     show_all: bool,
     include_non_interactive: bool,
     app_server: AppServerSession,
@@ -416,7 +432,7 @@ async fn run_resume_picker_with_launch_context(
     );
     let local_filter_cwd = local_picker_cwd_filter(&cwd_filter, uses_remote_workspace);
     let provider_filter = picker_provider_filter(config, uses_remote_workspace);
-    let runtime_keymap = picker_runtime_keymap(config)?;
+    let runtime_keymap = picker_runtime_keymap(local_settings)?;
     let options = SessionPickerRunOptions {
         show_all,
         filter_cwd: cwd_filter,
@@ -424,9 +440,11 @@ async fn run_resume_picker_with_launch_context(
         action: SessionPickerAction::Resume,
         launch_context,
         provider_filter,
-        initial_density: SessionListDensity::from(config.tui_session_picker_view),
+        initial_density: SessionListDensity::from(
+            local_settings.tui.session_picker_view.unwrap_or_default(),
+        ),
         view_persistence: Some(SessionPickerViewPersistence {
-            codex_home: config.codex_home.to_path_buf(),
+            codex_home: local_settings.codex_home.to_path_buf(),
         }),
         pager_keymap: runtime_keymap.pager,
         list_keymap: runtime_keymap.list,
@@ -456,6 +474,7 @@ async fn run_resume_picker_with_launch_context(
 pub async fn run_fork_picker_with_app_server(
     tui: &mut Tui,
     config: &Config,
+    local_settings: &crate::local_settings::LocalSettings,
     show_all: bool,
     app_server: AppServerSession,
 ) -> Result<SessionSelection> {
@@ -470,7 +489,7 @@ pub async fn run_fork_picker_with_app_server(
     );
     let local_filter_cwd = local_picker_cwd_filter(&cwd_filter, uses_remote_workspace);
     let provider_filter = picker_provider_filter(config, uses_remote_workspace);
-    let runtime_keymap = picker_runtime_keymap(config)?;
+    let runtime_keymap = picker_runtime_keymap(local_settings)?;
     let options = SessionPickerRunOptions {
         show_all,
         filter_cwd: cwd_filter,
@@ -478,9 +497,11 @@ pub async fn run_fork_picker_with_app_server(
         action: SessionPickerAction::Fork,
         launch_context: SessionPickerLaunchContext::Startup,
         provider_filter,
-        initial_density: SessionListDensity::from(config.tui_session_picker_view),
+        initial_density: SessionListDensity::from(
+            local_settings.tui.session_picker_view.unwrap_or_default(),
+        ),
         view_persistence: Some(SessionPickerViewPersistence {
-            codex_home: config.codex_home.to_path_buf(),
+            codex_home: local_settings.codex_home.to_path_buf(),
         }),
         pager_keymap: runtime_keymap.pager,
         list_keymap: runtime_keymap.list,
@@ -533,6 +554,15 @@ async fn run_session_picker_with_loader(
     state.start_initial_load();
     state.request_frame();
 
+    if let Ok(size) = alt.tui.terminal.size() {
+        let list_height = size.height.saturating_sub(PICKER_CHROME_HEIGHT) as usize;
+        state.update_viewport(list_height, list_viewport_width(size.width));
+        state.ensure_minimum_rows_for_view(list_height);
+    }
+    draw_picker(alt.tui, &state, alt.tui.terminal.last_known_screen_size)?;
+    if state.launch_context == SessionPickerLaunchContext::Startup {
+        alt.tui.discard_pending_input_before_interactive_screen()?;
+    }
     let mut tui_events = alt.tui.event_stream().fuse();
     let mut background_events = UnboundedReceiverStream::new(bg_rx).fuse();
 
@@ -564,7 +594,7 @@ async fn run_session_picker_with_loader(
                     TuiEvent::Paste(pasted) => {
                         state.handle_paste(pasted);
                     }
-                    TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) => {
+                    TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained => {
                         let list_width = list_viewport_width(screen_size.width);
                         let list_height =
                             usize::from(screen_size.height.saturating_sub(PICKER_CHROME_HEIGHT));
@@ -575,6 +605,7 @@ async fn run_session_picker_with_loader(
                             state.open_pending_transcript_if_ready();
                         }
                     }
+                    TuiEvent::FocusLost => {}
                 }
             }
             Some(event) = background_events.next() => {
@@ -617,8 +648,8 @@ fn picker_provider_filter(config: &Config, uses_remote_workspace: bool) -> Provi
     }
 }
 
-fn picker_runtime_keymap(config: &Config) -> Result<RuntimeKeymap> {
-    RuntimeKeymap::from_config(&config.tui_keymap)
+fn picker_runtime_keymap(config: &crate::local_settings::LocalSettings) -> Result<RuntimeKeymap> {
+    RuntimeKeymap::from_config(&config.tui.keymap)
         .map_err(|err| color_eyre::eyre::eyre!("invalid keymap configuration: {err}"))
 }
 
@@ -724,6 +755,7 @@ fn spawn_app_server_page_loader(
                         .map(|response| SessionTarget {
                             path: response.thread.path,
                             thread_id,
+                            history_mode: Some(response.thread.history_mode),
                         })
                         .map_err(std::io::Error::other);
                     let _ = bg_tx.send(BackgroundEvent::Unarchive { thread_id, result });
@@ -774,6 +806,7 @@ struct PickerState {
     pagination: PaginationState,
     all_rows: Vec<Row>,
     filtered_rows: Vec<Row>,
+    thread_history_modes: HashMap<ThreadId, ThreadHistoryMode>,
     seen_rows: HashSet<SeenRowKey>,
     selected: usize,
     scroll_top: usize,
@@ -832,13 +865,13 @@ enum SessionTranscriptState {
     Failed,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TranscriptPreviewLine {
     speaker: TranscriptPreviewSpeaker,
     text: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TranscriptPreviewSpeaker {
     User,
     Assistant,
@@ -858,156 +891,24 @@ async fn load_app_server_page(
         .await
         .map_err(std::io::Error::other)?;
     let num_scanned_files = response.data.len();
+    let (rows, history_modes): (Vec<_>, HashMap<_, _>) = response
+        .data
+        .into_iter()
+        .filter_map(|thread| {
+            let history_mode = thread.history_mode;
+            let row = row_from_app_server_thread(thread)?;
+            let thread_id = row.thread_id?;
+            Some((row, (thread_id, history_mode)))
+        })
+        .unzip();
 
     Ok(PickerPage {
-        rows: response
-            .data
-            .into_iter()
-            .filter_map(row_from_app_server_thread)
-            .collect(),
+        rows,
+        history_modes,
         next_cursor: response.next_cursor.map(PageCursor::AppServer),
         num_scanned_files,
         reached_scan_cap: false,
     })
-}
-
-pub(crate) async fn load_transcript_preview(
-    app_server: &mut AppServerSession,
-    thread_id: ThreadId,
-    config: Option<&Config>,
-) -> std::io::Result<Vec<TranscriptPreviewLine>> {
-    const MAX_PREVIEW_LINES: usize = 6;
-
-    let mut thread = app_server
-        .thread_read(thread_id, /*include_turns*/ false)
-        .await
-        .map_err(std::io::Error::other)?;
-    if thread.history_mode == ThreadHistoryMode::Legacy {
-        app_server
-            .hydrate_initial_thread_history(
-                &mut thread,
-                /*turn_cursor*/ None,
-                /*item_cursor*/ None,
-                /*config*/ None,
-                crate::app_server_session::HistoryHydrationScope::Initial,
-            )
-            .await
-            .map_err(std::io::Error::other)?;
-    }
-    let cwd = thread.cwd.as_path();
-    let inline_visualization_context = config.and_then(|config| {
-        ThreadId::from_string(&thread.id)
-            .ok()
-            .and_then(|thread_id| InlineVisualizationContext::from_config(config, thread_id))
-    });
-    let mut lines = if thread.history_mode == ThreadHistoryMode::Paginated {
-        let mut groups = Vec::new();
-        let mut visible_lines = 0_usize;
-        let mut scanned_items = 0_usize;
-        let mut cursor = None;
-        let mut seen_cursors = HashSet::new();
-        loop {
-            let page = app_server
-                .thread_items_page(
-                    thread_id,
-                    /*turn_id*/ None,
-                    cursor.clone(),
-                    HISTORY_ITEM_PAGE_LIMIT,
-                )
-                .await
-                .map_err(std::io::Error::other)?;
-            scanned_items = scanned_items.saturating_add(page.data.len());
-            for entry in page.data {
-                let item_lines = transcript_preview_lines_for_item(
-                    &entry.item,
-                    cwd,
-                    inline_visualization_context.as_ref(),
-                );
-                visible_lines = visible_lines.saturating_add(item_lines.len());
-                if !item_lines.is_empty() {
-                    groups.push(item_lines);
-                }
-                if visible_lines >= MAX_PREVIEW_LINES {
-                    break;
-                }
-            }
-            if visible_lines >= MAX_PREVIEW_LINES || scanned_items >= HISTORY_ITEM_SCAN_LIMIT {
-                break;
-            }
-            let Some(next_cursor) = page
-                .next_cursor
-                .filter(|next| seen_cursors.insert(next.clone()))
-            else {
-                break;
-            };
-            cursor = Some(next_cursor);
-        }
-        groups.into_iter().rev().flatten().collect::<Vec<_>>()
-    } else {
-        thread
-            .turns
-            .iter()
-            .flat_map(|turn| turn.items.iter())
-            .flat_map(|item| {
-                transcript_preview_lines_for_item(item, cwd, inline_visualization_context.as_ref())
-            })
-            .collect::<Vec<_>>()
-    };
-    if lines.len() > MAX_PREVIEW_LINES {
-        lines.drain(..lines.len() - MAX_PREVIEW_LINES);
-    }
-    Ok(lines)
-}
-
-fn transcript_preview_lines_for_item(
-    item: &ThreadItem,
-    cwd: &Path,
-    inline_visualization_context: Option<&InlineVisualizationContext>,
-) -> Vec<TranscriptPreviewLine> {
-    let line = match item {
-        ThreadItem::UserMessage { content, .. } => TranscriptPreviewLine {
-            speaker: TranscriptPreviewSpeaker::User,
-            text: content
-                .iter()
-                .filter_map(|input| match input {
-                    codex_app_server_protocol::UserInput::Text { text, .. } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(" "),
-        },
-        ThreadItem::AgentMessage { text, .. } => {
-            let visible_markdown = parse_assistant_markdown(text, cwd).visible_markdown;
-            let rewritten = crate::inline_visualization::rewrite_inline_visualizations(
-                &visible_markdown,
-                inline_visualization_context,
-            );
-            let mut text = rewritten.markdown.into_owned();
-            for (placeholder, link) in &rewritten.trusted_file_links {
-                text = text.replace(
-                    &format!(
-                        "{}  \n[{}]({placeholder})",
-                        link.markdown_label, link.markdown_destination_label
-                    ),
-                    &format!("{}  \n{}", link.display_label, link.destination),
-                );
-            }
-            TranscriptPreviewLine {
-                speaker: TranscriptPreviewSpeaker::Assistant,
-                text,
-            }
-        }
-        _ => return Vec::new(),
-    };
-
-    line.text
-        .lines()
-        .filter(|text| !text.trim().is_empty())
-        .map(|text| TranscriptPreviewLine {
-            speaker: line.speaker,
-            text: text.trim().to_string(),
-        })
-        .collect()
 }
 
 impl SearchState {
@@ -1101,6 +1002,7 @@ impl PickerState {
             pagination: PaginationState::new(),
             all_rows: Vec::new(),
             filtered_rows: Vec::new(),
+            thread_history_modes: HashMap::new(),
             seen_rows: HashSet::new(),
             selected: 0,
             scroll_top: 0,
@@ -1362,7 +1264,11 @@ impl PickerState {
                             self.request_unarchive(thread_id);
                             return Ok(None);
                         }
-                        return Ok(Some(self.action.selection(path, thread_id)));
+                        return Ok(Some(self.action.selection(SessionTarget {
+                            path,
+                            thread_id,
+                            history_mode: self.thread_history_modes.get(&thread_id).copied(),
+                        })));
                     }
                     self.inline_error = Some(match path {
                         Some(path) => {
@@ -1497,6 +1403,7 @@ impl PickerState {
         self.reset_pagination();
         self.all_rows.clear();
         self.filtered_rows.clear();
+        self.thread_history_modes.clear();
         self.seen_rows.clear();
         self.selected = 0;
         self.pending_page_down_target = None;
@@ -1629,12 +1536,14 @@ impl PickerState {
     fn ingest_page(&mut self, page: PickerPage) {
         let PickerPage {
             rows,
+            history_modes,
             next_cursor,
             num_scanned_files,
             reached_scan_cap,
         } = page;
         self.pagination
             .complete_page(next_cursor, num_scanned_files, reached_scan_cap);
+        self.thread_history_modes.extend(history_modes);
 
         for row in rows {
             if let Some(seen_key) = row.seen_key() {
@@ -2094,6 +2003,7 @@ fn thread_list_params(
     use_state_db_only: bool,
 ) -> ThreadListParams {
     ThreadListParams {
+        originators: None,
         cursor,
         limit: Some(PAGE_SIZE as u32),
         sort_key: Some(sort_key),
@@ -2105,6 +2015,7 @@ fn thread_list_params(
         source_kinds: Some(crate::resume_source_kinds(include_non_interactive)),
         archived: Some(status == SessionStatus::Archived),
         section_id: None,
+        project_id: None,
         parent_thread_id: None,
         ancestor_thread_id: None,
         cwd: cwd_filter.map(|cwd| ThreadListCwdFilter::One(cwd.to_string_lossy().into_owned())),
@@ -3548,6 +3459,7 @@ fn render_empty_state_line(state: &PickerState) -> Line<'static> {
 mod tests {
     use super::*;
     use chrono::Duration;
+    use codex_app_server_protocol::ThreadItem;
     use codex_app_server_protocol::ThreadSourceKind;
     use codex_config::CONFIG_TOML_FILE;
     use codex_protocol::ThreadId;
@@ -3573,6 +3485,7 @@ mod tests {
     ) -> PickerPage {
         PickerPage {
             rows,
+            history_modes: HashMap::new(),
             next_cursor: next_cursor.map(|cursor| PageCursor::AppServer(cursor.to_string())),
             num_scanned_files,
             reached_scan_cap,
@@ -3843,12 +3756,12 @@ mod tests {
             "indexed metadata",
         );
         row.thread_id = Some(thread_id);
-        deliver_page(
-            &mut state,
-            &db_request,
-            ok_page(vec![row], /*next_cursor*/ None),
-        )
-        .await;
+        let mut listed_page = ok_page(vec![row], /*next_cursor*/ None)
+            .expect("indexed thread page should be available");
+        listed_page
+            .history_modes
+            .insert(thread_id, ThreadHistoryMode::Legacy);
+        deliver_page(&mut state, &db_request, Ok(listed_page)).await;
 
         let selection = state
             .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -3858,6 +3771,7 @@ mod tests {
             selection,
             Some(SessionSelection::Resume(SessionTarget {
                 thread_id: selected_thread_id,
+                history_mode: Some(ThreadHistoryMode::Legacy),
                 ..
             })) if selected_thread_id == thread_id
         ));
@@ -5742,6 +5656,7 @@ session_picker_view = "dense"
             render_list(&mut frame, area, &state);
         }
         terminal.flush().expect("flush");
+        terminal.swap_buffers();
         assert!(terminal.backend().to_string().contains("↓ more"));
 
         state.density = SessionListDensity::Dense;
@@ -6342,6 +6257,7 @@ session_picker_view = "dense"
             Some(SessionSelection::Resume(SessionTarget {
                 path: None,
                 thread_id: selected_thread_id,
+                history_mode: None,
             })) => assert_eq!(selected_thread_id, thread_id),
             other => panic!("unexpected selection: {other:?}"),
         }
@@ -6351,6 +6267,8 @@ session_picker_view = "dense"
     fn app_server_row_keeps_pathless_threads() {
         let thread_id = ThreadId::new();
         let thread = Thread {
+            originator: None,
+            environments: None,
             id: thread_id.to_string(),
             extra: None,
             session_id: thread_id.to_string(),
@@ -6360,8 +6278,11 @@ session_picker_view = "dense"
             ephemeral: false,
             section: None,
             section_entered_at: None,
+            project_id: None,
             history_mode: Default::default(),
             model_provider: String::from("openai"),
+            model: None,
+            reasoning_effort: None,
             created_at: 1,
             updated_at: 2,
             recency_at: Some(2),
@@ -6392,6 +6313,8 @@ session_picker_view = "dense"
 
         let thread_id = ThreadId::new();
         let thread = Thread {
+            originator: None,
+            environments: None,
             id: thread_id.to_string(),
             extra: None,
             session_id: thread_id.to_string(),
@@ -6401,8 +6324,11 @@ session_picker_view = "dense"
             ephemeral: false,
             section: None,
             section_entered_at: None,
+            project_id: None,
             history_mode: Default::default(),
             model_provider: String::from("openai"),
+            model: None,
+            reasoning_effort: None,
             created_at: 1,
             updated_at: 2,
             recency_at: Some(2),
@@ -6434,6 +6360,8 @@ session_picker_view = "dense"
                         text: String::from("hello from assistant"),
                         phase: None,
                         memory_citation: None,
+                        delivery: None,
+                        questions: None,
                     },
                     ThreadItem::Plan {
                         id: String::from("plan-1"),
@@ -6471,6 +6399,8 @@ session_picker_view = "dense"
 
         let thread_id = ThreadId::new();
         let thread = Thread {
+            originator: None,
+            environments: None,
             id: thread_id.to_string(),
             extra: None,
             session_id: thread_id.to_string(),
@@ -6480,8 +6410,11 @@ session_picker_view = "dense"
             ephemeral: false,
             section: None,
             section_entered_at: None,
+            project_id: None,
             history_mode: Default::default(),
             model_provider: String::from("openai"),
+            model: None,
+            reasoning_effort: None,
             created_at: 1,
             updated_at: 2,
             recency_at: Some(2),
@@ -6543,6 +6476,8 @@ session_picker_view = "dense"
 
         let thread_id = ThreadId::new();
         let thread = Thread {
+            originator: None,
+            environments: None,
             id: thread_id.to_string(),
             extra: None,
             session_id: thread_id.to_string(),
@@ -6552,8 +6487,11 @@ session_picker_view = "dense"
             ephemeral: false,
             section: None,
             section_entered_at: None,
+            project_id: None,
             history_mode: Default::default(),
             model_provider: String::from("openai"),
+            model: None,
+            reasoning_effort: None,
             created_at: 1,
             updated_at: 2,
             recency_at: Some(2),

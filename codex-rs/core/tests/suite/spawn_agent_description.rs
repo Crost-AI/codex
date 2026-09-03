@@ -3,9 +3,9 @@
 
 use anyhow::Result;
 use codex_core::config::AgentRoleConfig;
+use codex_core::config::Config;
 use codex_features::Feature;
 use codex_history::RolloutItem;
-use codex_history::RolloutLine;
 use codex_login::CodexAuth;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
@@ -20,6 +20,7 @@ use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::openai_models::default_input_modalities;
 use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
+use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_models_once;
@@ -52,6 +53,22 @@ fn spawn_agent_exposes_agent_type(body: &Value, namespace: &str) -> bool {
         .is_some()
 }
 
+fn resolved_root_usage_hint(config: &Config, request: &ResponsesRequest) -> String {
+    if let Some(configured) = config.multi_agent_v2.root_agent_usage_hint_text.as_deref() {
+        return configured.to_string();
+    }
+
+    request
+        .message_input_text_groups("developer")
+        .into_iter()
+        .rev()
+        .find_map(|group| {
+            (group.len() == 1 && group[0].contains("available concurrency slots"))
+                .then(|| group[0].clone())
+        })
+        .expect("resolved root usage hint should be a standalone developer message")
+}
+
 fn test_model_info(
     slug: &str,
     display_name: &str,
@@ -67,7 +84,7 @@ fn test_model_info(
         description: Some(description.to_string()),
         default_reasoning_level: Some(default_reasoning_level),
         supported_reasoning_levels,
-        shell_type: ConfigShellToolType::ShellCommand,
+        shell_type: ConfigShellToolType::UnifiedExec,
         visibility,
         supported_in_api: true,
         input_modalities: default_input_modalities(),
@@ -80,6 +97,7 @@ fn test_model_info(
         model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
+        multi_agent_reasoning_effort: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers,
@@ -217,7 +235,7 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
     );
     assert!(
         description.contains(
-            "Do not set the `model` field unless the user explicitly asks for a different model or there is a clear task-specific reason."
+            "Do not set the `model` field unless the user explicitly asks for a different model."
         ),
         "expected model override usage guidance in spawn_agent description: {description:?}"
     );
@@ -435,7 +453,7 @@ async fn multi_agent_v2_cold_resume_refreshes_legacy_usage_hints_once(
     let mut removed_usage_hint_presence = false;
     let legacy_rollout = std::fs::read_to_string(&rollout_path)?
         .lines()
-        .map(serde_json::from_str::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line)
         .collect::<std::result::Result<Vec<_>, _>>()?
         .into_iter()
         .map(|mut line| {
@@ -483,18 +501,13 @@ async fn multi_agent_v2_cold_resume_refreshes_legacy_usage_hints_once(
         }
     });
     let resumed = resumed_builder.resume(&server, home, rollout_path).await?;
-    let current_usage_hint = resumed
-        .config
-        .multi_agent_v2
-        .root_agent_usage_hint_text
-        .clone()
-        .expect("current root usage hint should be configured");
 
     resumed.submit_turn("first turn after upgrading").await?;
     resumed.submit_turn("second turn after upgrading").await?;
 
     let requests = resumed_responses.requests();
     assert_eq!(requests.len(), 2);
+    let current_usage_hint = resolved_root_usage_hint(&resumed.config, &requests[0]);
     for request in &requests {
         let developer_messages = request.message_input_text_groups("developer");
         let current_usage_hint_positions = developer_messages
@@ -624,12 +637,6 @@ async fn multi_agent_v2_resume_refreshes_changed_wait_guidance(
     )
     .await;
     let resumed = test_codex().resume(&server, home, rollout_path).await?;
-    let current_usage_hint = resumed
-        .config
-        .multi_agent_v2
-        .root_agent_usage_hint_text
-        .clone()
-        .expect("current root usage hint should be configured");
 
     resumed
         .submit_turn("first turn with updated wait-agent availability")
@@ -640,6 +647,7 @@ async fn multi_agent_v2_resume_refreshes_changed_wait_guidance(
 
     let requests = resumed_responses.requests();
     assert_eq!(requests.len(), 2);
+    let current_usage_hint = resolved_root_usage_hint(&resumed.config, &requests[0]);
     for request in &requests {
         let developer_messages = request.message_input_text_groups("developer");
         let current_usage_hint_positions = developer_messages

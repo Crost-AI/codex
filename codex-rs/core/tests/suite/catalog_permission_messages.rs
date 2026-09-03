@@ -31,6 +31,8 @@ async fn catalog_permission_message_loaded_from_remote_models_is_sent() -> Resul
     let model_slug = "remote-catalog-permissions-model";
     let mut model = model_info_from_slug(model_slug);
     model.model_messages = Some(ModelMessages {
+        persistent_instructions: None,
+        tools: None,
         instructions_template: None,
         instructions_variables: None,
         approvals: None,
@@ -41,7 +43,10 @@ async fn catalog_permission_message_loaded_from_remote_models_is_sent() -> Resul
             workspace_write: None,
             read_only: Some("remote catalog permissions: {{ network_access }}".to_string()),
         }),
+        multi_agent: None,
         token_budget: None,
+        confirmation_policies: None,
+        guardian_v2: None,
     });
     let models_mock = mount_models_once(
         &server,

@@ -27,7 +27,7 @@ pub(crate) use promote::PromoteToSharedTool;
 /// Tools contributed when memory is enabled and promotion is allowed.
 pub(crate) fn crost_memory_tools(
     runtime: Arc<CrostMemoryRuntime>,
-) -> Vec<Arc<dyn ToolExecutor<ToolCall>>> {
+) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
     vec![Arc::new(PromoteToSharedTool::new(runtime))]
 }
 
@@ -57,7 +57,7 @@ pub(super) fn crost_memory_function_tool<I: JsonSchema, O: JsonSchema>(
 }
 
 pub(super) fn parse_args<T: for<'de> Deserialize<'de>>(
-    call: &ToolCall,
+    call: &ToolCall<'_>,
 ) -> Result<T, FunctionCallError> {
     let arguments = call.function_arguments()?;
     let value = if arguments.trim().is_empty() {

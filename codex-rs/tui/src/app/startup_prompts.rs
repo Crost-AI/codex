@@ -154,7 +154,10 @@ pub(super) fn should_show_model_migration_prompt(
     false
 }
 
-pub(super) fn migration_prompt_hidden(config: &Config, migration_config_key: &str) -> bool {
+pub(super) fn migration_prompt_hidden(
+    config: &crate::local_settings::LocalSettings,
+    migration_config_key: &str,
+) -> bool {
     match migration_config_key {
         HIDE_GPT_5_1_CODEX_MAX_MIGRATION_PROMPT_CONFIG => config
             .notices
@@ -228,28 +231,29 @@ pub(super) fn select_model_availability_nux(
 }
 
 pub(super) async fn prepare_startup_tooltip_override(
-    config: &mut Config,
+    config: &mut crate::local_settings::LocalSettings,
     available_models: &[ModelPreset],
     is_first_run: bool,
 ) -> Option<String> {
-    if is_first_run || !config.show_tooltips {
+    if is_first_run || !config.tui.show_tooltips {
         return None;
     }
 
     let tooltip_override =
-        select_model_availability_nux(available_models, &config.model_availability_nux)?;
+        select_model_availability_nux(available_models, &config.tui.model_availability_nux)?;
 
     let shown_count = config
+        .tui
         .model_availability_nux
         .shown_count
         .get(&tooltip_override.model_slug)
         .copied()
         .unwrap_or_default();
     let next_count = shown_count.saturating_add(1);
-    let mut updated_shown_count = config.model_availability_nux.shown_count.clone();
+    let mut updated_shown_count = config.tui.model_availability_nux.shown_count.clone();
     updated_shown_count.insert(tooltip_override.model_slug.clone(), next_count);
 
-    if let Err(err) = ConfigEditsBuilder::for_config(config)
+    if let Err(err) = ConfigEditsBuilder::for_config_path(config.user_config_path.as_path())
         .set_model_availability_nux_count(&updated_shown_count)
         .apply()
         .await
@@ -262,17 +266,18 @@ pub(super) async fn prepare_startup_tooltip_override(
         return Some(tooltip_override.message);
     }
 
-    config.model_availability_nux.shown_count = updated_shown_count;
+    config.tui.model_availability_nux.shown_count = updated_shown_count;
     Some(tooltip_override.message)
 }
 
 pub(super) async fn handle_model_migration_prompt_if_needed(
     tui: &mut tui::Tui,
     config: &mut Config,
+    local_settings: &crate::local_settings::LocalSettings,
     model: &str,
     app_event_tx: &AppEventSender,
     available_models: &[ModelPreset],
-) -> Option<AppExitInfo> {
+) -> std::io::Result<Option<AppExitInfo>> {
     let upgrade = available_models
         .iter()
         .find(|preset| preset.model == model)
@@ -287,23 +292,24 @@ pub(super) async fn handle_model_migration_prompt_if_needed(
         ..
     }) = upgrade
     {
-        if migration_prompt_hidden(config, migration_config_key.as_str()) {
-            return None;
+        if migration_prompt_hidden(local_settings, migration_config_key.as_str()) {
+            return Ok(None);
         }
 
         let target_model = target_model.to_string();
         if !should_show_model_migration_prompt(
             model,
             &target_model,
-            &config.notices.model_migrations,
+            &local_settings.notices.model_migrations,
             available_models,
         ) {
-            return None;
+            return Ok(None);
         }
 
         let current_preset = available_models.iter().find(|preset| preset.model == model);
-        let target_preset = target_preset_for_upgrade(available_models, &target_model);
-        let target_preset = target_preset?;
+        let Some(target_preset) = target_preset_for_upgrade(available_models, &target_model) else {
+            return Ok(None);
+        };
         let target_display_name = target_preset.display_name.clone();
         let heading_label = if target_display_name == model {
             target_model.clone()
@@ -323,7 +329,7 @@ pub(super) async fn handle_model_migration_prompt_if_needed(
             target_description,
             can_opt_out,
         );
-        match run_model_migration_prompt(tui, prompt_copy).await {
+        match run_model_migration_prompt(tui, prompt_copy).await? {
             ModelMigrationOutcome::Accepted => {
                 apply_accepted_model_migration(
                     config,
@@ -340,18 +346,19 @@ pub(super) async fn handle_model_migration_prompt_if_needed(
                 });
             }
             ModelMigrationOutcome::Exit => {
-                return Some(AppExitInfo {
+                return Ok(Some(AppExitInfo {
                     token_usage: TokenUsage::default(),
                     thread_id: None,
                     resume_hint: None,
+                    disconnect_info: None,
                     update_action: None,
                     exit_reason: ExitReason::UserRequested,
-                });
+                }));
             }
         }
     }
 
-    None
+    Ok(None)
 }
 pub(super) fn normalize_harness_overrides_for_cwd(
     mut overrides: ConfigOverrides,

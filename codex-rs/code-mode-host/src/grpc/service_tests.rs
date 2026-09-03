@@ -91,11 +91,16 @@ async fn execute_stream_starts_immediately_and_wait_preserves_missing_cells() {
     request.yield_time_ms = Some(60_000);
     let (cell_id, mut execution) = execute_events(&host, request).await;
 
+    let yielded = execution.next().await.unwrap().unwrap();
+    let Some(proto::execute_event::Event::Outcome(yielded_outcome)) = &yielded.event else {
+        panic!("expected execution outcome");
+    };
     assert_eq!(
-        execution.next().await.unwrap().unwrap(),
+        yielded,
         proto::ExecuteEvent {
             event: Some(proto::execute_event::Event::Outcome(
                 proto::ExecutionOutcome {
+                    code_mode_host_duration_ns: yielded_outcome.code_mode_host_duration_ns,
                     cell_id: cell_id.clone(),
                     content_items: vec![proto::ContentItem {
                         item: Some(proto::content_item::Item::Text(proto::TextContent {
@@ -119,11 +124,15 @@ async fn execute_stream_starts_immediately_and_wait_preserves_missing_cells() {
         .await
         .expect("wait for completion")
         .into_inner();
+    let Some(proto::wait_response::State::LiveCell(completed_outcome)) = &completed.state else {
+        panic!("expected live-cell wait outcome");
+    };
     assert_eq!(
         completed,
         proto::WaitResponse {
             state: Some(proto::wait_response::State::LiveCell(
                 proto::ExecutionOutcome {
+                    code_mode_host_duration_ns: completed_outcome.code_mode_host_duration_ns,
                     cell_id: cell_id.clone(),
                     content_items: vec![proto::ContentItem {
                         item: Some(proto::content_item::Item::Text(proto::TextContent {
@@ -162,6 +171,80 @@ async fn execute_stream_starts_immediately_and_wait_preserves_missing_cells() {
         missing.state,
         Some(proto::wait_response::State::MissingCell(_))
     ));
+}
+
+/// Missing, empty, and explicit default namespaces identify the same subscribed tool.
+#[tokio::test]
+async fn filtered_subscriptions_match_default_namespace_aliases() {
+    let aliases = [
+        (None, Some("functions".to_string())),
+        (Some(String::new()), None),
+        (Some("functions".to_string()), Some(String::new())),
+    ];
+
+    for (tool_namespace, filter_namespace) in aliases {
+        let host = GrpcCodeModeHost::new();
+        let (session_id, _events) = open_session(&host).await;
+        let mut subscription = host
+            .subscribe_to_tool_calls(Request::new(proto::SubscribeToToolCallsRequest {
+                session_id: session_id.clone(),
+                tool_names: vec![proto::ToolName {
+                    name: "echo".to_string(),
+                    namespace: filter_namespace,
+                }],
+            }))
+            .await
+            .expect("subscribe with a default-namespace alias")
+            .into_inner();
+        let mut request = execute_request(
+            &session_id,
+            "default-namespace",
+            "text(await tools.echo({}));",
+        );
+        request.yield_time_ms = Some(/*value*/ 60_000);
+        let mut enabled_tool = tool("echo");
+        enabled_tool.tool_name = Some(proto::ToolName {
+            name: "echo".to_string(),
+            namespace: tool_namespace.clone(),
+        });
+        request.enabled_tools = vec![enabled_tool];
+        let (_cell_id, mut execution) = execute_events(&host, request).await;
+
+        let invocation = subscription
+            .next()
+            .await
+            .expect("matching default-namespace invocation")
+            .expect("tool invocation");
+        assert_eq!(
+            invocation.tool_name,
+            Some(proto::ToolName {
+                name: "echo".to_string(),
+                namespace: tool_namespace,
+            })
+        );
+        host.complete_tool_call(Request::new(proto::CompleteToolCallRequest {
+            session_id,
+            invocation_id: invocation.invocation_id,
+            outcome: Some(proto::complete_tool_call_request::Outcome::Succeeded(
+                proto::ToolCallSucceeded {
+                    output_json: br#""done""#.to_vec(),
+                },
+            )),
+        }))
+        .await
+        .expect("complete the matching tool call");
+        assert!(matches!(
+            execution.next().await,
+            Some(Ok(proto::ExecuteEvent {
+                event: Some(proto::execute_event::Event::Outcome(
+                    proto::ExecutionOutcome {
+                        outcome: Some(proto::execution_outcome::Outcome::Completed(_)),
+                        ..
+                    }
+                )),
+            }))
+        ));
+    }
 }
 
 #[tokio::test]

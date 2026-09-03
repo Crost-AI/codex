@@ -93,7 +93,7 @@ impl PromoteToSharedTool {
         Self { runtime }
     }
 
-    async fn handle_call(&self, call: ToolCall) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    async fn handle_call(&self, call: ToolCall<'_>) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
         let args: PromoteToSharedArgs = parse_args(&call)?;
         let title = args.title.trim().to_string();
         if title.is_empty() {
@@ -156,7 +156,7 @@ impl PromoteToSharedTool {
     }
 }
 
-impl ToolExecutor<ToolCall> for PromoteToSharedTool {
+impl<'call> ToolExecutor<ToolCall<'call>> for PromoteToSharedTool {
     fn tool_name(&self) -> ToolName {
         crost_memory_tool_name(PROMOTE_TO_SHARED_TOOL_NAME)
     }
@@ -170,7 +170,10 @@ impl ToolExecutor<ToolCall> for PromoteToSharedTool {
         )
     }
 
-    fn handle(&self, call: ToolCall) -> ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, call: ToolCall<'call>) -> ToolExecutorFuture<'a>
+    where
+        ToolCall<'call>: 'a,
+    {
         Box::pin(self.handle_call(call))
     }
 }

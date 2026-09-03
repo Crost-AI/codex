@@ -169,7 +169,7 @@ where
 {
     fn contribute<'a>(
         &'a self,
-        input: TurnInputContext,
+        input: TurnInputContext<'a>,
         _extension_metrics: Option<std::sync::Arc<dyn codex_extension_api::ExtensionMetrics>>,
         _session_store: &'a ExtensionData,
         thread_store: &'a ExtensionData,
@@ -354,7 +354,7 @@ where
         &self,
         _session_store: &ExtensionData,
         thread_store: &ExtensionData,
-    ) -> Vec<Arc<dyn ToolExecutor<ToolCall>>> {
+    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
         let Some(runtime) = thread_store
             .get::<CrostMemoryThreadState>()
             .and_then(|state| state.runtime())

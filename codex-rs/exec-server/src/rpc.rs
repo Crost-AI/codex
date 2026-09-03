@@ -16,6 +16,7 @@ use codex_exec_server_protocol::JSONRPCNotification;
 use codex_exec_server_protocol::JSONRPCRequest;
 use codex_exec_server_protocol::JSONRPCResponse;
 use codex_exec_server_protocol::RequestId;
+use codex_protocol::protocol::W3cTraceContext;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -37,6 +38,7 @@ use crate::rpc_server_requests::RpcServerRequestSender;
 pub(crate) const SESSION_ALREADY_ATTACHED_ERROR_CODE: i64 = -32010;
 const MAX_IN_FLIGHT_REGULAR_CALLS: usize = 1024;
 const RESERVED_CLEANUP_CALLS: usize = 1;
+const RESERVED_OUTBOUND_CONTROL_MESSAGES: usize = 16;
 
 #[derive(Debug)]
 pub(crate) enum RpcCallError {
@@ -67,9 +69,14 @@ enum RpcCallTimeout {
 
 #[derive(Debug)]
 pub(crate) enum RpcClientEvent {
-    Request(JSONRPCRequest),
+    Request {
+        request: JSONRPCRequest,
+        request_span: tracing::Span,
+    },
     Notification(JSONRPCNotification),
-    Disconnected { reason: Option<String> },
+    Disconnected {
+        reason: Option<String>,
+    },
 }
 
 pub(crate) enum RpcInboundRequestAdmissionError {
@@ -153,6 +160,25 @@ impl RpcNotificationSender {
             .await
             .map_err(|_| internal_error("RPC connection closed while sending notification".into()))
     }
+
+    pub(crate) fn try_notify<P: Serialize>(&self, method: &str, params: &P) -> bool {
+        let Ok(permit) = self.outgoing_tx.try_reserve() else {
+            return false;
+        };
+        if self.outgoing_tx.capacity() < RESERVED_OUTBOUND_CONTROL_MESSAGES {
+            return false;
+        }
+        let Ok(params) = serde_json::to_value(params) else {
+            return false;
+        };
+        permit.send(RpcServerOutboundMessage::Notification(
+            JSONRPCNotification {
+                method: method.to_string(),
+                params: Some(params),
+            },
+        ));
+        true
+    }
 }
 
 pub(crate) struct RpcRouter<S> {
@@ -184,13 +210,25 @@ where
         F: Fn(Arc<S>, P) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<R, JSONRPCErrorError>> + Send + 'static,
     {
+        self.request_with_trace(method, move |state, params, _trace| handler(state, params));
+    }
+
+    /// Supplies the incoming W3C carrier to handlers that need it without requiring a trace exporter.
+    pub(crate) fn request_with_trace<P, R, F, Fut>(&mut self, method: &'static str, handler: F)
+    where
+        P: DeserializeOwned + Send + 'static,
+        R: Serialize + Send + 'static,
+        F: Fn(Arc<S>, P, Option<W3cTraceContext>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<R, JSONRPCErrorError>> + Send + 'static,
+    {
         self.request_routes.insert(
             method,
             Box::new(move |state, request| {
+                let trace = request.trace;
                 let request_id = request.id;
                 let params = request.params;
                 let response =
-                    decode_request_params::<P>(params).map(|params| handler(state, params));
+                    decode_request_params::<P>(params).map(|params| handler(state, params, trace));
                 Box::pin(async move {
                     let response = match response {
                         Ok(response) => response.await,
@@ -318,6 +356,22 @@ impl RpcClient {
                             handle_server_message(&pending_for_reader, &event_tx, message).await
                         {
                             let _ = err;
+                            break None;
+                        }
+                    }
+                    JsonRpcConnectionEvent::QueuedRequest {
+                        request,
+                        request_span,
+                        ..
+                    } => {
+                        if event_tx
+                            .send(RpcClientEvent::Request {
+                                request,
+                                request_span,
+                            })
+                            .await
+                            .is_err()
+                        {
                             break None;
                         }
                     }
@@ -755,7 +809,10 @@ async fn handle_server_message(
         }
         JSONRPCMessage::Request(request) => {
             event_tx
-                .send(RpcClientEvent::Request(request))
+                .send(RpcClientEvent::Request {
+                    request,
+                    request_span: tracing::Span::none(),
+                })
                 .await
                 .map_err(|_| "RPC client event receiver closed".to_string())?;
         }
@@ -784,6 +841,7 @@ mod tests {
 
     use codex_exec_server_protocol::JSONRPCMessage;
     use codex_exec_server_protocol::JSONRPCNotification;
+    use codex_exec_server_protocol::JSONRPCRequest;
     use codex_exec_server_protocol::JSONRPCResponse;
     use codex_exec_server_protocol::RequestId;
     use opentelemetry::trace::TracerProvider as _;
@@ -793,6 +851,7 @@ mod tests {
     use tokio::io::AsyncBufReadExt;
     use tokio::io::AsyncWriteExt;
     use tokio::io::BufReader;
+    use tokio::sync::mpsc;
     use tokio::task::JoinSet;
     use tokio::time::timeout;
     use tracing::Instrument;
@@ -800,11 +859,28 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::MAX_IN_FLIGHT_REGULAR_CALLS;
+    use super::RESERVED_OUTBOUND_CONTROL_MESSAGES;
     use super::RpcCallError;
     use super::RpcClient;
+    use super::RpcClientEvent;
+    use super::RpcNotificationSender;
     use crate::connection::JsonRpcConnection;
     use crate::connection::JsonRpcConnectionEvent;
     use crate::connection::JsonRpcTransport;
+
+    #[tokio::test]
+    async fn best_effort_notifications_preserve_outbound_control_capacity() {
+        let (outgoing_tx, _outgoing_rx) = mpsc::channel(RESERVED_OUTBOUND_CONTROL_MESSAGES + 2);
+        let notifications = RpcNotificationSender::new(outgoing_tx);
+
+        assert!(notifications.try_notify("network/policyDecision", &serde_json::json!({"n": 1})));
+        assert!(notifications.try_notify("network/policyDecision", &serde_json::json!({"n": 2})));
+        assert!(!notifications.try_notify("network/policyDecision", &serde_json::json!({"n": 3})));
+        notifications
+            .response(RequestId::Integer(7), serde_json::json!({"ok": true}))
+            .await
+            .expect("reserved capacity must remain available for controller responses");
+    }
 
     async fn read_jsonrpc_line<R>(lines: &mut tokio::io::Lines<BufReader<R>>) -> JSONRPCMessage
     where
@@ -840,6 +916,79 @@ mod tests {
         if let Err(err) = writer.write_all(format!("{encoded}\n").as_bytes()).await {
             panic!("failed to write JSON-RPC line: {err}");
         }
+    }
+
+    #[tokio::test]
+    async fn inbound_request_span_stays_open_until_event_consumption() {
+        let span_exporter = InMemorySpanExporter::default();
+        let tracer_provider = SdkTracerProvider::builder()
+            .with_simple_exporter(span_exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer_provider.tracer("exec-server-test"))
+                .with_filter(filter_fn(codex_otel::OtelProvider::trace_export_filter)),
+        );
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+
+        let (outgoing_tx, _outgoing_rx) = tokio::sync::mpsc::channel(/*buffer*/ 1);
+        let (incoming_tx, incoming_rx) = tokio::sync::mpsc::channel(/*buffer*/ 1);
+        let (_disconnected_tx, disconnected_rx) = tokio::sync::watch::channel(/*init*/ false);
+        let connection = JsonRpcConnection {
+            outgoing_tx,
+            incoming_rx,
+            disconnected_rx,
+            task_handles: Vec::new(),
+            transport: JsonRpcTransport::Plain,
+        };
+        let (_client, mut events_rx) = RpcClient::new(connection);
+
+        incoming_tx
+            .send(JsonRpcConnectionEvent::message(JSONRPCMessage::Request(
+                JSONRPCRequest {
+                    id: RequestId::Integer(1),
+                    method: "test/callback".to_string(),
+                    params: None,
+                    trace: None,
+                },
+            )))
+            .await
+            .expect("queue inbound client request");
+        timeout(Duration::from_secs(1), async {
+            while events_rx.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("inbound request should enter the client event queue");
+        assert!(
+            span_exporter
+                .get_finished_spans()
+                .expect("request span export")
+                .is_empty(),
+            "the request span must remain open until the client consumes the event"
+        );
+
+        let Some(RpcClientEvent::Request {
+            request,
+            request_span,
+        }) = events_rx.recv().await
+        else {
+            panic!("expected an inbound client request");
+        };
+        assert_eq!(request.method, "test/callback");
+        request_span.record("otel.name", "test/callback");
+        drop(request_span);
+
+        tracer_provider.force_flush().expect("flush traces");
+        let spans = span_exporter.get_finished_spans().expect("span export");
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.name.as_ref() == "test/callback"),
+            "the request span should cover the complete event queue wait"
+        );
     }
 
     #[tokio::test]

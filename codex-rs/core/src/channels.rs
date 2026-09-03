@@ -36,6 +36,8 @@ use tracing::warn;
 use crate::config::Config;
 use crate::session::TurnInput;
 use crate::session::session::Session;
+use crate::session::session::SessionSettingsUpdate;
+use crate::session::turn_context::NewTurnContextOptions;
 use crate::state::ActiveTurn;
 use crate::tasks::RegularTask;
 
@@ -213,8 +215,11 @@ impl ChannelHub {
             .latest_call_tool(
                 server_name,
                 &descriptor.reply_tool,
+                /*environment_id*/ None,
                 Some(serde_json::Value::Object(arguments)),
-                None,
+                /*meta*/ None,
+                /*requested_timeout*/ None,
+                /*wait_for_server*/ false,
             )
             .await
         {
@@ -289,10 +294,18 @@ impl Session {
             *active_turn = Some(ActiveTurn::default());
         }
 
-        let turn_context = self
-            .new_default_turn_with_sub_id(uuid::Uuid::new_v4().to_string())
-            .await;
-        if turn_context.mode == ModeKind::Plan {
+        let Ok((turn_context, _)) = self
+            .new_turn_with_sub_id(
+                uuid::Uuid::new_v4().to_string(),
+                SessionSettingsUpdate::default(),
+                NewTurnContextOptions::default(),
+            )
+            .await
+        else {
+            self.clear_reserved_idle_turn_for_channels().await;
+            return;
+        };
+        if self.collaboration_mode().await.mode == ModeKind::Plan {
             self.clear_reserved_idle_turn_for_channels().await;
             return;
         }
@@ -314,7 +327,7 @@ impl Session {
         }];
         self.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
             .await;
-        self.start_task(turn_context, input, RegularTask::new(), crate::tasks::MailboxParentProvenance::Ignore)
+        self.start_task(turn_context, input, RegularTask::new())
             .await;
     }
 
