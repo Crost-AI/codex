@@ -12,11 +12,14 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::Weak;
 
 use codex_channels::BoundedEventQueue;
+use codex_channels::CHANNEL_EVENT_MARKER;
 use codex_channels::CHANNEL_EVENT_PREAMBLE;
 use codex_channels::CHANNEL_EVENT_SEPARATOR;
 use codex_channels::ChannelEvent;
@@ -49,6 +52,9 @@ pub(crate) struct ChannelHub {
     setup: Mutex<ChannelSetup>,
     queue: Mutex<BoundedEventQueue>,
     session: OnceLock<Weak<Session>>,
+    /// Set once the full preamble has been delivered in this session; later
+    /// batches carry only [`CHANNEL_EVENT_MARKER`].
+    preamble_sent: AtomicBool,
 }
 
 impl ChannelHub {
@@ -59,6 +65,7 @@ impl ChannelHub {
             setup: Mutex::new(ChannelSetup::default()),
             queue: Mutex::new(BoundedEventQueue::default()),
             session: OnceLock::new(),
+            preamble_sent: AtomicBool::new(false),
         }
     }
 
@@ -244,6 +251,19 @@ impl ChannelHub {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .drain_all()
     }
+
+    /// Renders a batch of drained events as turn input. The first batch of a
+    /// session carries the full [`CHANNEL_EVENT_PREAMBLE`]; every later batch
+    /// carries the one-line [`CHANNEL_EVENT_MARKER`] instead, so standing
+    /// instructions are not repeated on every delivery.
+    fn render_batch(&self, events: &[String]) -> String {
+        let header = if self.preamble_sent.swap(true, Ordering::AcqRel) {
+            CHANNEL_EVENT_MARKER
+        } else {
+            CHANNEL_EVENT_PREAMBLE
+        };
+        format!("{header}\n\n{}", events.join(CHANNEL_EVENT_SEPARATOR))
+    }
 }
 
 impl Session {
@@ -314,10 +334,7 @@ impl Session {
             self.clear_reserved_idle_turn_for_channels().await;
             return;
         }
-        let text = format!(
-            "{CHANNEL_EVENT_PREAMBLE}\n\n{}",
-            events.join(CHANNEL_EVENT_SEPARATOR)
-        );
+        let text = hub.render_batch(&events);
         let input = vec![TurnInput::UserInput {
             content: vec![UserInput::Text {
                 text,
@@ -359,10 +376,7 @@ impl Session {
         if events.is_empty() {
             return true;
         }
-        let text = format!(
-            "{CHANNEL_EVENT_PREAMBLE}\n\n{}",
-            events.join(CHANNEL_EVENT_SEPARATOR)
-        );
+        let text = self.services.channel_hub.render_batch(&events);
         self.input_queue
             .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
                 active_turn.turn_state.as_ref(),

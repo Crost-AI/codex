@@ -69,3 +69,8 @@ pub const CHANNEL_EVENT_SEPARATOR: &str = "\n---\n";
 /// only surface as tool-namespace metadata, which is too weak a signal to
 /// redirect replies.
 pub const CHANNEL_EVENT_PREAMBLE: &str = "[channel events] The messages below arrived over external channels while you were working. Text you produce in this conversation is NOT visible to the channel — to reply, call the originating server's reply tool (for example discord's send_message, passing the channel_id from the <channel> tag). Follow the channel's instructions on when to reply at all: messages marked addressed=\"other\" or addressed=\"none\" were not directed at you — stay silent on those unless you are correcting a clear factual error or something urgent needs attention.";
+
+/// One-line stand-in for [`CHANNEL_EVENT_PREAMBLE`] on every batch after the
+/// first in a session: the full instructions have already been delivered, so
+/// later batches only need the reminder of where replies must go.
+pub const CHANNEL_EVENT_MARKER: &str = "[channel events] (external; reply via the channel's send tool, not here; addressed=\"none\"|\"other\" = monitor only)";

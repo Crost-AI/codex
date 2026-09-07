@@ -9,6 +9,9 @@ use codex_mcp::EffectiveMcpServer;
 use pretty_assertions::assert_eq;
 
 use super::ChannelHub;
+use codex_channels::CHANNEL_EVENT_MARKER;
+use codex_channels::CHANNEL_EVENT_PREAMBLE;
+use codex_channels::CHANNEL_EVENT_SEPARATOR;
 use super::apply_channel_env_overlay;
 
 fn stdio_server(env: Option<HashMap<String, String>>) -> EffectiveMcpServer {
@@ -167,4 +170,17 @@ fn env_overlay_missing_dotenv_still_injects_host_defaults() {
             ),
         ]))
     );
+}
+
+#[test]
+fn preamble_is_delivered_once_then_marker() {
+    let hub = ChannelHub::new();
+    let first = hub.render_batch(&["a".to_string(), "b".to_string()]);
+    assert_eq!(
+        first,
+        format!("{CHANNEL_EVENT_PREAMBLE}\n\na{CHANNEL_EVENT_SEPARATOR}b")
+    );
+    let second = hub.render_batch(&["c".to_string()]);
+    assert_eq!(second, format!("{CHANNEL_EVENT_MARKER}\n\nc"));
+    assert!(!second.contains("arrived over external channels"));
 }
