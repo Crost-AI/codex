@@ -14,6 +14,7 @@ use codex_state::ThreadMetadata;
 use super::LocalThreadStore;
 use super::helpers::distinct_thread_metadata_title;
 use super::helpers::git_info_from_parts;
+use super::helpers::has_guardian_default_title;
 use super::helpers::permission_profile_from_metadata_value;
 use super::helpers::rollout_path_is_archived;
 use super::helpers::set_thread_name;
@@ -36,6 +37,9 @@ pub(super) async fn read_thread(
     let persisted_model_settings = sqlite_metadata
         .as_ref()
         .map(|metadata| (metadata.model.clone(), metadata.reasoning_effort.clone()));
+    let daybreak_enabled = sqlite_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.daybreak_enabled);
     if let Some(metadata) = sqlite_metadata
         && (params.include_archived
             || (metadata.archived_at.is_none()
@@ -70,6 +74,7 @@ pub(super) async fn read_thread(
                 rollout_thread.name = thread.name;
             }
             rollout_thread.project_id = thread.project_id;
+            rollout_thread.daybreak_enabled = thread.daybreak_enabled;
             rollout_thread.model = thread.model;
             rollout_thread.reasoning_effort = thread.reasoning_effort;
             rollout_thread.git_info = thread.git_info;
@@ -97,6 +102,7 @@ pub(super) async fn read_thread(
             })?;
 
     let mut thread = read_thread_from_rollout_path(store, path).await?;
+    thread.daybreak_enabled = daybreak_enabled;
     if let Some((model, reasoning_effort)) = persisted_model_settings {
         thread.model = model;
         thread.reasoning_effort = reasoning_effort;
@@ -151,6 +157,7 @@ pub(super) async fn read_thread_by_rollout_path(
             thread.section_position = metadata.section_position;
             thread.section_entered_at = metadata.section_entered_at;
             thread.project_id = metadata.project_id;
+            thread.daybreak_enabled = metadata.daybreak_enabled;
             thread.model = metadata.model;
             thread.reasoning_effort = metadata.reasoning_effort;
             if !metadata.cwd.as_os_str().is_empty()
@@ -400,6 +407,7 @@ pub(super) fn stored_thread_from_state_metadata(
         section_position: metadata.section_position,
         section_entered_at: metadata.section_entered_at,
         project_id: metadata.project_id,
+        daybreak_enabled: metadata.daybreak_enabled,
         cwd: metadata.cwd,
         cli_version: metadata.cli_version,
         originator: metadata.originator,
@@ -430,14 +438,16 @@ async fn thread_name_from_metadata(
     match history_mode {
         ThreadHistoryMode::Paginated => sqlite_thread_name(metadata),
         ThreadHistoryMode::Legacy => {
-            if let Some(title) = distinct_thread_metadata_title(metadata) {
-                Some(title)
+            let title = distinct_thread_metadata_title(metadata);
+            if title.is_some() && !has_guardian_default_title(metadata) {
+                title
             } else {
                 find_thread_name_by_id(store.config.codex_home.as_path(), &metadata.id)
                     .await
                     .ok()
                     .flatten()
                     .filter(|name| !name.trim().is_empty())
+                    .or(title)
             }
         }
     }
@@ -500,6 +510,7 @@ fn stored_thread_from_meta_line(
         section_position: None,
         section_entered_at: None,
         project_id: None,
+        daybreak_enabled: None,
         cwd: meta_line.meta.cwd,
         cli_version: meta_line.meta.cli_version,
         originator: (!meta_line.meta.originator.is_empty()).then_some(meta_line.meta.originator),

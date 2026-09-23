@@ -1,3 +1,4 @@
+use super::helpers::drain_insert_history_transcript;
 use super::*;
 use codex_app_server_protocol::AuthRecoveryNotification;
 use codex_protocol::error::CodexErr;
@@ -13,6 +14,7 @@ fn thread_settings_for_test(
     codex_app_server_protocol::ThreadSettingsUpdatedNotification {
         thread_id: thread_id.to_string(),
         thread_settings: codex_app_server_protocol::ThreadSettings {
+            disabled_plugin_ids: Vec::new(),
             cwd: test_path_buf("/tmp/thread-settings").abs(),
             approval_policy: AskForApproval::OnRequest,
             approvals_reviewer: codex_app_server_protocol::ApprovalsReviewer::AutoReview,
@@ -43,6 +45,7 @@ fn thread_settings_for_test(
 
 fn configured_thread_session(thread_id: ThreadId) -> crate::session_state::ThreadSessionState {
     crate::session_state::ThreadSessionState {
+        windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
         fork_parent_title: None,
@@ -64,6 +67,83 @@ fn configured_thread_session(thread_id: ThreadId) -> crate::session_state::Threa
         network_proxy: None,
         rollout_path: None,
     }
+}
+
+#[tokio::test]
+async fn session_header_uses_catalog_display_name_without_changing_model() {
+    let slug = "us.openai.gpt-5.6-luna";
+    for (name, first_event, display_name) in [
+        ("startup", true, Some("GPT-5.6 Luna")),
+        ("resume", false, Some("GPT-5.6 Luna")),
+        ("unknown_model", false, None),
+    ] {
+        let (mut chat, mut events, _ops) = make_chatwidget_manual(Some(slug)).await;
+        let mut preset = get_available_model(&chat, "gpt-5.5");
+        preset.model = slug.to_string();
+        preset.display_name = display_name.unwrap_or_default().to_string();
+        chat.model_catalog = Arc::new(ModelCatalog::new(
+            display_name.map(|_| preset).into_iter().collect(),
+        ));
+        chat.show_welcome_banner = first_event;
+        chat.local_settings.tui.show_tooltips = false;
+        let mut session = configured_thread_session(ThreadId::new());
+        session.model = slug.to_string();
+        session.reasoning_effort = Some(ReasoningEffortConfig::High);
+        chat.handle_thread_session(session);
+
+        let rendered = drain_insert_history_with(&mut events, HistoryCell::raw_lines)
+            .iter()
+            .map(|lines| lines_to_single_string(lines))
+            .collect::<String>()
+            .replace(CODEX_CLI_VERSION, "<VERSION>")
+            .replace("C:\\tmp\\thread-settings", "/tmp/thread-settings");
+        assert_chatwidget_snapshot!(format!("catalog_model_session_header_{name}"), rendered);
+        assert_eq!(chat.current_model(), slug);
+    }
+}
+
+#[tokio::test]
+async fn session_and_settings_sync_server_provider_id() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
+    chat.config.model_provider.base_url = Some("https://local-provider.example/v1".to_string());
+    let status = |chat: &mut ChatWidget| {
+        chat.add_status_output(
+            /*refreshing_rate_limits*/ false, /*request_id*/ None,
+        );
+        chat.transcript
+            .last_status_copy_targets
+            .as_ref()
+            .expect("status")
+            .handle
+            .copy_text()
+    };
+    assert!(!status(&mut chat).contains("Model provider:"));
+
+    let first_id = ThreadId::new();
+    let mut first = configured_thread_session(first_id);
+    first.model_provider_id = "server-ollama".to_string();
+    chat.handle_thread_session(first.clone());
+    let displayed = status(&mut chat);
+    assert!(displayed.contains("Model provider:") && displayed.contains("server-ollama"));
+    assert!(!displayed.contains("local-provider.example"));
+
+    let mut other = configured_thread_session(ThreadId::new());
+    other.model_provider_id = "server-bedrock".to_string();
+    chat.handle_thread_session_quiet(other);
+    let displayed = status(&mut chat);
+    assert!(displayed.contains("server-bedrock"));
+    assert!(!displayed.contains("server-ollama"));
+
+    chat.handle_thread_session_quiet(first);
+    assert_eq!(chat.config.model_provider_id, "server-ollama");
+
+    let mut updated = thread_settings_for_test("gpt-5.4", first_id);
+    updated.thread_settings.model_provider = "server-updated".to_string();
+    chat.handle_server_notification(
+        ServerNotification::ThreadSettingsUpdated(updated),
+        /*replay_kind*/ None,
+    );
+    assert!(status(&mut chat).contains("server-updated"));
 }
 
 fn start_safety_buffering_test_turn(
@@ -143,7 +223,7 @@ fn open_safety_buffering_retry_confirmation(
 #[tokio::test]
 async fn safety_buffering_offers_one_retry_with_app_wording() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    let mut preset = get_available_model(&chat, "gpt-5.4");
+    let mut preset = get_available_model(&chat, "gpt-5.5");
     preset.model = "faster-model".to_string();
     preset.display_name = "Faster Model".to_string();
     chat.model_catalog = Arc::new(ModelCatalog::new(vec![preset]));
@@ -780,7 +860,11 @@ async fn live_app_server_turn_completed_clears_working_status_after_answer_item(
         /*replay_kind*/ None,
     );
 
-    assert!(drain_insert_history(&mut rx).is_empty());
+    let completion_cells = drain_insert_history_normalized(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines).trim().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(completion_cells, vec!["[completion time]"]);
     assert!(!chat.bottom_pane.is_task_running());
     assert!(chat.bottom_pane.status_widget().is_none());
     assert_eq!(
@@ -813,6 +897,7 @@ async fn live_app_server_turn_started_sets_feedback_turn_id() {
     chat.open_feedback_note(
         crate::app_event::FeedbackCategory::Bug,
         /*include_logs*/ false,
+        crate::bottom_pane::FeedbackAudience::External,
     );
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -839,7 +924,7 @@ async fn live_app_server_warning_notification_renders_message() {
         /*replay_kind*/ None,
     );
 
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert_eq!(cells.len(), 1, "expected one warning history cell");
     let rendered = lines_to_single_string(&cells[0]);
     let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -870,7 +955,7 @@ async fn live_app_server_warning_notification_renders_message() {
     ] {
         chat.handle_server_notification(notification, /*replay_kind*/ None);
 
-        let [cell] = drain_insert_history(&mut rx)
+        let [cell] = drain_insert_history_transcript(&mut rx)
             .try_into()
             .expect("expected one authentication recovery history cell");
         recovery_messages.push_str(&lines_to_single_string(&cell));
@@ -893,7 +978,7 @@ async fn live_app_server_guardian_warning_notification_renders_message() {
         /*replay_kind*/ None,
     );
 
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert_eq!(cells.len(), 1, "expected one warning history cell");
     let rendered = lines_to_single_string(&cells[0]);
     assert!(
@@ -920,7 +1005,7 @@ async fn live_app_server_strict_review_required_notification_renders_message() {
         /*replay_kind*/ None,
     );
 
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert_eq!(cells.len(), 1, "expected one warning history cell");
     assert_chatwidget_snapshot!("strict_review_required", lines_to_single_string(&cells[0]));
     chat.on_exec_command_output_delta("cmd-1", "streamed output\n");
@@ -936,46 +1021,75 @@ async fn live_app_server_strict_review_required_notification_renders_message() {
 }
 
 #[tokio::test]
-async fn live_app_server_config_warning_prefixes_summary() {
+async fn config_warning_during_turn_retains_transcript_details() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
+    handle_turn_started(&mut chat, "turn-1");
     chat.handle_server_notification(
         ServerNotification::ConfigWarning(ConfigWarningNotification {
-            summary: "Invalid configuration; using defaults.".to_string(),
-            details: None,
+            summary: "Invalid configuration; using defaults.".into(),
+            details: Some("Check the project configuration.".into()),
             path: None,
             range: None,
         }),
         /*replay_kind*/ None,
     );
-
-    let cells = drain_insert_history(&mut rx);
-    assert_eq!(cells.len(), 1, "expected one warning history cell");
-    let rendered = lines_to_single_string(&cells[0]);
-    assert!(
-        rendered.contains("Invalid configuration; using defaults."),
-        "expected config warning summary, got {rendered}"
+    let cells = drain_insert_history_transcript(&mut rx);
+    insta::assert_snapshot!(
+        "runtime_config_warning",
+        cells
+            .iter()
+            .map(|lines| lines_to_single_string(lines))
+            .collect::<String>()
     );
+}
+
+#[tokio::test]
+async fn startup_config_warning_is_not_repeated_by_thread() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let message = "Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.";
+
+    for notification in [
+        ServerNotification::ConfigWarning(ConfigWarningNotification {
+            summary: message.to_string(),
+            details: None,
+            path: None,
+            range: None,
+        }),
+        ServerNotification::Warning(WarningNotification {
+            thread_id: Some("thread-1".to_string()),
+            message: message.to_string(),
+        }),
+    ] {
+        chat.handle_server_notification(notification, /*replay_kind*/ None);
+    }
+
+    let cells = drain_insert_history_transcript(&mut rx);
+    assert_eq!(cells.len(), 1);
+    insta::assert_snapshot!(lines_to_single_string(&cells[0]), @"
+    ⚠ Codex is ignoring 1 unrecognized configuration setting. Check for typos or
+      deprecated settings.
+    ");
 }
 
 #[tokio::test]
 async fn live_app_server_file_change_item_started_preserves_changes() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
+    let item = AppServerThreadItem::FileChange {
+        id: "patch-1".to_string(),
+        changes: vec![FileUpdateChange {
+            path: "foo.txt".to_string(),
+            kind: PatchChangeKind::Add,
+            diff: "hello\n".to_string(),
+        }],
+        status: AppServerPatchApplyStatus::InProgress,
+    };
     chat.handle_server_notification(
         ServerNotification::ItemStarted(ItemStartedNotification {
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
             started_at_ms: 0,
-            item: AppServerThreadItem::FileChange {
-                id: "patch-1".to_string(),
-                changes: vec![FileUpdateChange {
-                    path: "foo.txt".to_string(),
-                    kind: PatchChangeKind::Add,
-                    diff: "hello\n".to_string(),
-                }],
-                status: AppServerPatchApplyStatus::InProgress,
-            },
+            item: item.clone(),
         }),
         /*replay_kind*/ None,
     );
@@ -983,10 +1097,25 @@ async fn live_app_server_file_change_item_started_preserves_changes() {
     let cells = drain_insert_history(&mut rx);
     assert!(!cells.is_empty(), "expected patch history to be rendered");
     let transcript = lines_to_single_string(cells.last().expect("patch cell"));
-    assert!(
-        transcript.contains("Added foo.txt") || transcript.contains("Edited foo.txt"),
-        "expected patch summary to include foo.txt, got: {transcript}"
+    let AppServerThreadItem::FileChange { id, changes, .. } = item else {
+        unreachable!()
+    };
+    chat.replay_thread_item(
+        AppServerThreadItem::FileChange {
+            id,
+            changes,
+            status: AppServerPatchApplyStatus::Completed,
+        },
+        "turn-1".to_string(),
+        ReplayKind::ResumeInitialMessages,
     );
+    let replayed = drain_insert_history(&mut rx);
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(lines_to_single_string(&replayed[0]), transcript);
+    insta::assert_snapshot!(transcript, @"
+    • Added foo.txt (+1 -0)
+        1 +hello
+    ");
 }
 
 #[tokio::test]
@@ -1002,6 +1131,7 @@ async fn live_app_server_command_execution_strips_shell_wrapper() {
             turn_id: "turn-1".to_string(),
             started_at_ms: 0,
             item: AppServerThreadItem::CommandExecution {
+                model_context: None,
                 id: "cmd-1".to_string(),
                 command: command.clone(),
                 cwd: test_path_buf("/tmp").abs().into(),
@@ -1026,6 +1156,7 @@ async fn live_app_server_command_execution_strips_shell_wrapper() {
             turn_id: "turn-1".to_string(),
             completed_at_ms: 0,
             item: AppServerThreadItem::CommandExecution {
+                model_context: None,
                 id: "cmd-1".to_string(),
                 command,
                 cwd: test_path_buf("/tmp").abs().into(),
@@ -1424,7 +1555,10 @@ async fn live_app_server_turn_completion_repairs_dropped_message_deltas() {
         phase: Some(MessagePhase::FinalAnswer),
         memory_citation: None,
         delivery: None,
-        questions: None,
+        questions: Some(vec![codex_protocol::items::AsyncUserInputQuestion {
+            title: "Which way?".into(),
+            options: None,
+        }]),
     }];
     chat.handle_server_notification(
         ServerNotification::TurnCompleted(TurnCompletedNotification {
@@ -1455,6 +1589,11 @@ async fn live_app_server_turn_completion_repairs_dropped_message_deltas() {
         })
         .collect::<Vec<_>>();
     assert_eq!(consolidations.len(), 1);
+    assert_eq!(chat.bottom_pane.question_editor().unanswered_count(), 0);
+    assert!(matches!(
+        chat.pending_notification,
+        Some(Notification::AgentTurnComplete { .. })
+    ));
 }
 
 #[tokio::test]
@@ -1507,13 +1646,11 @@ async fn live_app_server_stream_recovery_restores_previous_status_header() {
         /*replay_kind*/ None,
     );
 
-    let status = chat
-        .bottom_pane
-        .status_widget()
-        .expect("status indicator should be visible");
-    assert_eq!(status.header(), "Working");
-    assert_eq!(status.details(), None);
+    assert_eq!(chat.status_state.current_status.header, "Working");
+    assert_eq!(chat.status_state.current_status.details, None);
     assert!(chat.status_state.retry_status_header.is_none());
+    assert!(chat.bottom_pane.status_widget().is_none());
+    assert!(chat.active_cell_is_stream_tail());
 }
 
 #[tokio::test]
@@ -1537,7 +1674,7 @@ async fn live_app_server_rate_limit_error_renders_upstream_message() {
 }
 
 #[tokio::test]
-async fn live_app_server_server_overloaded_error_renders_warning() {
+async fn live_app_server_server_overloaded_error_renders_error() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.handle_server_notification(
@@ -1575,7 +1712,7 @@ async fn live_app_server_server_overloaded_error_renders_warning() {
 
     let cells = drain_insert_history(&mut rx);
     assert_eq!(cells.len(), 1);
-    assert_eq!(lines_to_single_string(&cells[0]), "⚠ server overloaded\n");
+    assert_eq!(lines_to_single_string(&cells[0]), "■ server overloaded\n");
     assert!(!chat.bottom_pane.is_task_running());
 }
 
@@ -1619,8 +1756,8 @@ async fn live_app_server_cyber_policy_error_renders_dedicated_notice() {
     let cells = drain_insert_history(&mut rx);
     assert_eq!(cells.len(), 1);
     let rendered = lines_to_single_string(&cells[0]);
-    assert!(rendered.contains("This content can't be shown"));
-    assert!(rendered.contains("extra caution with cybersecurity requests"));
+    assert!(rendered.contains("This content can’t be shown"));
+    assert!(rendered.contains("We take extra care with some cybersecurity requests"));
     assert!(!rendered.contains("server fallback message"));
     assert!(!chat.bottom_pane.is_task_running());
 }
@@ -1681,7 +1818,7 @@ async fn live_app_server_model_verification_renders_warning() {
         /*replay_kind*/ None,
     );
 
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert_eq!(cells.len(), 1);
     let rendered = lines_to_single_string(&cells[0]);
     assert!(rendered.contains("multiple flags for possible cybersecurity risk"));
@@ -1712,11 +1849,13 @@ async fn live_app_server_invalid_thread_name_update_is_ignored() {
 }
 
 #[tokio::test]
-async fn live_app_server_thread_name_update_shows_resume_hint() {
+async fn live_app_server_manual_thread_name_updates_status_surfaces() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let thread_id =
         ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").expect("thread id");
     chat.thread_id = Some(thread_id);
+
+    chat.expect_manual_thread_name(thread_id, "review-fix".to_string());
 
     chat.handle_server_notification(
         ServerNotification::ThreadNameUpdated(
@@ -1730,46 +1869,53 @@ async fn live_app_server_thread_name_update_shows_resume_hint() {
 
     assert_eq!(chat.thread_name, Some("review-fix".to_string()));
     let cells = drain_insert_history(&mut rx);
-    assert_eq!(cells.len(), 1);
-    let rendered = lines_to_single_string(&cells[0]);
-    assert_chatwidget_snapshot!("thread_name_update_resume_hint", rendered);
+    let transcript = cells
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    let footer = render_bottom_popup(&chat, /*width*/ 80);
+    let title = chat.last_terminal_title.as_deref().unwrap();
+    assert_chatwidget_snapshot!(
+        "manual_thread_name_status_surfaces",
+        normalize_snapshot_paths(format!(
+            "transcript:\n{transcript}\nfooter:\n{footer}\ntitle: {title}"
+        ))
+    );
 }
 
 #[tokio::test]
 async fn live_app_server_automatic_thread_name_update_is_silent() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    let thread_id = ThreadId::new();
-    chat.thread_id = Some(thread_id);
-    for title in ["Provisional title", "Generated title"] {
-        chat.expect_automatic_thread_name(title.to_string());
-        assert_eq!(chat.thread_name(), Some(title.to_string()));
+    for replay_kind in [
+        None,
+        Some(ReplayKind::ThreadSnapshot),
+        Some(ReplayKind::ResumeInitialMessages),
+    ] {
+        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        let thread_id = ThreadId::new();
+        let mut session = configured_thread_session(thread_id);
+        session.thread_name = Some("Generated title".to_string());
+        chat.handle_thread_session(session);
+        drain_insert_history(&mut rx);
 
         chat.handle_server_notification(
             ServerNotification::ThreadNameUpdated(
                 codex_app_server_protocol::ThreadNameUpdatedNotification {
                     thread_id: thread_id.to_string(),
-                    thread_name: Some(title.to_string()),
+                    thread_name: Some("Generated title".to_string()),
                 },
             ),
-            /*replay_kind*/ None,
+            replay_kind,
         );
 
-        assert_eq!(chat.thread_name, Some(title.to_string()));
-        assert!(drain_insert_history(&mut rx).is_empty());
+        assert_eq!(chat.thread_name(), Some("Generated title".to_string()));
+        let transcript = drain_insert_history(&mut rx)
+            .iter()
+            .map(|lines| lines_to_single_string(lines))
+            .collect::<String>();
+        insta::allow_duplicates! {
+            assert_snapshot!(transcript, @"");
+        }
     }
-
-    chat.handle_server_notification(
-        ServerNotification::ThreadNameUpdated(
-            codex_app_server_protocol::ThreadNameUpdatedNotification {
-                thread_id: thread_id.to_string(),
-                thread_name: Some("Manual title".to_string()),
-            },
-        ),
-        /*replay_kind*/ None,
-    );
-
-    assert_eq!(chat.thread_name, Some("Manual title".to_string()));
-    assert_eq!(drain_insert_history(&mut rx).len(), 1);
 }
 
 #[tokio::test]
@@ -1777,7 +1923,6 @@ async fn live_app_server_manual_thread_name_is_visible_before_notification() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let thread_id = ThreadId::new();
     chat.thread_id = Some(thread_id);
-    chat.expect_automatic_thread_name("Provisional title".to_string());
 
     chat.expect_manual_thread_name(thread_id, "Manual title".to_string());
 
@@ -1795,7 +1940,7 @@ async fn live_app_server_manual_thread_name_is_visible_before_notification() {
     );
 
     assert_eq!(chat.thread_name(), Some("Manual title".to_string()));
-    assert_eq!(drain_insert_history(&mut rx).len(), 1);
+    assert!(drain_insert_history(&mut rx).is_empty());
 }
 
 #[tokio::test]

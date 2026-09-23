@@ -69,10 +69,10 @@
         "authStatus": {
           "$ref": "#/definitions/McpAuthStatus"
         },
-        "declaresChannelCapability": {
-          "description": "Whether the connected server declared the experimental `codex/channel` capability. Null while the server has not (yet) initialized.",
+        "httpOrigin": {
+          "description": "HTTP origin of the effective configured endpoint, including plugin servers. Excludes credentials, path, query, and fragment; null for non-HTTP transports.",
           "type": [
-            "boolean",
+            "string",
             "null"
           ]
         },
@@ -108,6 +108,9 @@
           ],
           "description": "Current thread-runtime connection state; null when unavailable or the configuration changed."
         },
+        "serverCapabilities": {
+          "description": "Capabilities advertised by the initialized MCP server; null when unavailable."
+        },
         "serverInfo": {
           "anyOf": [
             {
@@ -118,24 +121,23 @@
             }
           ]
         },
-        "source": {
-          "description": "Human-readable source of the winning server definition (e.g. \"config.toml (user)\" or \"plugin `acme`\"). Null when unknown.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "tools": {
           "additionalProperties": {
             "$ref": "#/definitions/Tool"
           },
           "type": "object"
+        },
+        "toolsError": {
+          "description": "Tool discovery failed and no catalog was returned. Null when a catalog is returned, including cached or empty catalogs.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "authStatus",
         "name",
-        "overriddenSources",
         "resourceTemplates",
         "resources",
         "tools"

@@ -1,6 +1,5 @@
 //! Bounded discovery for permission pickers; fixed request IDs bound abandoned RPCs.
-//! This never applies a profile;
-//! remote custom profiles remain display-only until selection stops rebuilding local config.
+//! This never applies a profile; the app chooses local or server-owned selection.
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
@@ -28,7 +27,6 @@ use uuid::Uuid;
 pub(crate) struct PermissionDiscovery {
     pub(crate) profiles: Vec<PermissionProfileSummary>,
     pub(crate) requirements: Option<ConfigRequirements>,
-    pub(crate) remote: bool,
     pub(crate) explicit_profile_mode: bool,
 }
 
@@ -52,7 +50,6 @@ impl PermissionDiscovery {
         Self {
             profiles,
             requirements: None,
-            remote: false,
             explicit_profile_mode: true,
         }
     }
@@ -64,7 +61,7 @@ impl PermissionDiscovery {
         reviewer: Option<ApprovalsReviewer>,
     ) -> Option<String> {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
-            return Some("Not available on this server.".to_string());
+            return Some("Not available on this server".to_string());
         };
         let requirements = self.requirements.as_ref();
         if !profile.allowed
@@ -78,11 +75,9 @@ impl PermissionDiscovery {
                 .and_then(|r| r.allowed_approvals_reviewers.as_ref())
                 .is_some_and(|allowed| reviewer.is_some_and(|value| !allowed.contains(&value)))
         {
-            return Some("Disabled by requirements.".to_string());
+            return Some("Disabled by requirements".to_string());
         }
-        (self.remote && !id.starts_with(':')).then(|| {
-            "Selecting custom profiles from a remote server is not supported yet.".to_string()
-        })
+        None
     }
 }
 
@@ -138,7 +133,6 @@ pub(crate) fn fetch(
                     return Ok(PermissionDiscovery {
                         profiles: Vec::new(),
                         requirements: None,
-                        remote: true,
                         explicit_profile_mode: false,
                     });
                 }
@@ -180,7 +174,6 @@ pub(crate) fn fetch(
                     return Ok(PermissionDiscovery {
                         profiles,
                         requirements: requirements.requirements,
-                        remote: mode == ThreadParamsMode::Remote,
                         explicit_profile_mode: true,
                     });
                 };

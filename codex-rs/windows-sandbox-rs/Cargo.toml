@@ -18,10 +18,15 @@ path = "src/bin/setup_main/main.rs"
 name = "codex-command-runner"
 path = "src/bin/command_runner/main.rs"
 
+[[bin]]
+name = "codex-windows-managed-deny-probe"
+path = "src/bin/managed_deny_probe/main.rs"
+
 [lints]
 workspace = true
 
 [dependencies]
+codex-http-client = { workspace = true }
 anyhow = "1.0"
 base64 = { workspace = true }
 chrono = { version = "0.4.42", default-features = false, features = [
@@ -76,6 +81,7 @@ features = [
     "Win32_System_Console",
     "Win32_System_RemoteDesktop",
     "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_NetworkManagement_NetManagement",
     "Win32_NetworkManagement_WindowsFilteringPlatform",

@@ -6,20 +6,26 @@ use crate::permission_discovery::PermissionDiscovery;
 pub(super) const VIEW_ID: &str = "permission-profiles";
 
 impl ChatWidget {
+    pub(crate) fn retain_input_after_failed_permission_selection(&mut self) {
+        self.input_queue.recovered_queue |= self.input_queue.has_queued_follow_up_messages()
+            || !self.input_queue.pending_steers.is_empty();
+        if let Some(message) = self.initial_user_message.take() {
+            self.restore_user_message_to_composer(message);
+        }
+    }
     pub(crate) fn request_permission_profiles(&mut self) {
         self.invalidate_permission_discovery();
         let request_id = uuid::Uuid::new_v4();
         self.permission_popup_request_id = Some(request_id);
         self.bottom_pane.show_selection_view(SelectionViewParams {
             view_id: Some(VIEW_ID),
-            title: Some("Update Model Permissions".to_string()),
+            title: Some("Update Model Permissions".into()),
             items: vec![SelectionItem {
                 name: "Loading permission profiles…".to_string(),
                 is_disabled: true,
                 ..Default::default()
             }],
-            footer_hint: Some(standard_popup_hint_line()),
-            ..Default::default()
+            ..SelectionViewParams::picker()
         });
         self.app_event_tx.send(AppEvent::FetchPermissionProfiles {
             request_id,
@@ -67,8 +73,7 @@ impl ChatWidget {
                     dismiss_on_select: true,
                     ..Default::default()
                 }],
-                footer_hint: Some(standard_popup_hint_line()),
-                ..Default::default()
+                ..SelectionViewParams::picker()
             }),
         }
     }

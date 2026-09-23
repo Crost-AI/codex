@@ -1,3 +1,5 @@
+mod connect_options;
+
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -48,6 +50,8 @@ use tracing::instrument::WithSubscriber;
 
 #[path = "environment/accepted.rs"]
 mod accepted;
+
+pub use connect_options::RemoteEnvironmentOptions;
 
 pub const CODEX_EXEC_SERVER_URL_ENV_VAR: &str = "CODEX_EXEC_SERVER_URL";
 pub const CODEX_EXEC_SERVER_NOISE_REGISTRY_URL_ENV_VAR: &str =
@@ -466,13 +470,30 @@ impl EnvironmentManager {
         exec_server_url: String,
         connect_timeout: Option<std::time::Duration>,
     ) -> Result<(), ExecServerError> {
-        validate_environment_id(&environment_id)?;
-        let exec_server_url = validate_remote_exec_server_url(exec_server_url)?;
-        let environment = Arc::new(Environment::remote_with_transport(
-            ExecServerTransportParams::websocket_url(
+        self.upsert_environment_with_options(
+            environment_id,
+            RemoteEnvironmentOptions {
                 exec_server_url,
-                connect_timeout.unwrap_or(DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT),
-            ),
+                connect_timeout,
+                http_headers: HashMap::new(),
+            },
+        )
+    }
+
+    /// Adds or replaces a direct environment with trusted host-owned connection options.
+    ///
+    /// Invalid headers and WebSocket-controlled handshake headers are rejected
+    /// before the environment is registered. Valid headers are retained for
+    /// automatic reconnects without changing existing URL-only environment APIs.
+    pub fn upsert_environment_with_options(
+        &self,
+        environment_id: String,
+        options: RemoteEnvironmentOptions,
+    ) -> Result<(), ExecServerError> {
+        validate_environment_id(&environment_id)?;
+        let transport = options.into_transport_params()?;
+        let environment = Arc::new(Environment::remote_with_transport(
+            transport,
             self.local_runtime_paths.clone(),
             self.http_client_factory.clone(),
         ));
@@ -589,18 +610,6 @@ fn validate_environment_id(environment_id: &str) -> Result<(), ExecServerError> 
         )));
     }
     Ok(())
-}
-
-fn validate_remote_exec_server_url(exec_server_url: String) -> Result<String, ExecServerError> {
-    let (exec_server_url, disabled) = normalize_exec_server_url(Some(exec_server_url));
-    if disabled {
-        return Err(ExecServerError::Protocol(
-            "remote environment cannot use disabled exec-server url".to_string(),
-        ));
-    }
-    exec_server_url.ok_or_else(|| {
-        ExecServerError::Protocol("remote environment requires an exec-server url".to_string())
-    })
 }
 
 fn noise_environment_config_from_env()
@@ -899,6 +908,19 @@ impl Environment {
         }
     }
 
+    /// Registration on the installed Noise session, without connecting or refreshing it.
+    ///
+    /// Returns `None` before a session is installed and for non-Noise environments.
+    /// A registry lookup does not change this value until the new connection is
+    /// installed. Recovery may renew the registration while preserving the session.
+    /// Callers that authorize asynchronously must check the snapshot again before
+    /// admitting work.
+    pub fn cached_executor_registration_id(&self) -> Option<String> {
+        self.remote_client
+            .as_ref()
+            .and_then(LazyRemoteExecServerClient::cached_executor_registration_id)
+    }
+
     /// Refresh the connection to the executor currently registered for this environment.
     ///
     /// # Caller contract
@@ -911,11 +933,11 @@ impl Environment {
     /// # Session behavior
     ///
     /// A fresh registry lookup determines whether the current session can be reused.
-    /// A changed executor key, or a failed or missing session, causes a fresh connection
+    /// A changed registration or executor key, or a failed or missing session, causes a fresh connection
     /// without resuming the old session. Retirement cancels old recovery, fails its
     /// outstanding work and process handles, and never replays commands. The environment
     /// object and filesystem handle remain usable through the new connection.
-    /// A matching executor key preserves a session that has not failed, including one
+    /// A matching registration and executor key preserve a session that has not failed, including one
     /// that is recovering; the live readiness check rejects a recovering connection.
     ///
     /// # Completion and errors
@@ -980,7 +1002,7 @@ impl Environment {
                     if params.roots.iter().any(|root| {
                         root.sandbox
                             .as_ref()
-                            .is_some_and(crate::FileSystemSandboxContext::should_run_in_sandbox)
+                            .is_some_and(crate::FileSystemSandboxContext::should_read_from_sandbox)
                     }) && !client
                         .environment_info()
                         .await?
@@ -999,19 +1021,28 @@ impl Environment {
                         tracing::warn!(%error, "replaying capability discovery after executor recovery");
                         let recovered =
                             tokio::time::timeout(std::time::Duration::from_secs(8), async {
-                                while self.readiness_result().is_none_or(|result| result.is_err()) {
+                                loop {
+                                    match self.readiness_result() {
+                                        Some(Ok(())) => return Some(Ok(())),
+                                        Some(Err(error))
+                                            if !crate::client::is_retryable_recovery_error(
+                                                &error,
+                                            ) =>
+                                        {
+                                            return Some(Err(error));
+                                        }
+                                        Some(Err(_)) | None => {}
+                                    }
                                     if connection_state.changed().await.is_err() {
-                                        return false;
+                                        return None;
                                     }
                                 }
-                                true
                             })
-                            .await
-                            .unwrap_or(false);
-                        if recovered {
-                            discover().await
-                        } else {
-                            Err(error)
+                            .await;
+                        match recovered {
+                            Ok(Some(Ok(()))) => discover().await,
+                            Ok(Some(Err(error))) => Err(error),
+                            Ok(None) | Err(_) => Err(error),
                         }
                     }
                     response => response,
@@ -1112,6 +1143,11 @@ impl Environment {
 
     pub fn get_filesystem(&self) -> Arc<dyn ExecutorFileSystem> {
         Arc::clone(&self.filesystem)
+    }
+
+    /// Borrows the shared filesystem identity without extending the environment's lifetime.
+    pub fn filesystem_ref(&self) -> &Arc<dyn ExecutorFileSystem> {
+        &self.filesystem
     }
 
     /// Returns a filesystem view that fails instead of starting or waiting for a connection.
@@ -1829,7 +1865,7 @@ mod tests {
         let source = sandbox_cwd
             .to_abs_path()
             .expect_err("sandbox cwd should not be native to this host");
-        let sandbox = crate::FileSystemSandboxContext::from_permission_profile_with_cwd(
+        let sandbox = crate::FileSystemSandboxContext::from_permission_profile(
             codex_protocol::models::PermissionProfile::workspace_write(),
             sandbox_cwd.clone(),
         );
@@ -1881,6 +1917,8 @@ mod tests {
                 &codex_protocol::permissions::FileSystemSandboxPolicy::restricted(Vec::new()),
                 codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
             ),
+            PathUri::from_host_native_path(std::env::current_dir().expect("read current dir"))
+                .expect("cwd URI"),
         );
 
         let err = environment
