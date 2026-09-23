@@ -352,11 +352,11 @@ impl Session {
         // notification wiring the connection set installs per server. Every
         // runtime install and rebuild flows through here, so the resolution
         // always matches the servers actually being started.
-        let tool_plugin_provenance = codex_mcp::tool_plugin_provenance(&mcp_config);
+        let tool_plugin_context = codex_mcp::tool_plugin_context(&mcp_config);
         let channel_setup = self
             .services
             .channel_hub
-            .refresh_setup(&tool_plugin_provenance, &mcp_servers);
+            .refresh_setup(&tool_plugin_context, &mcp_servers);
         crate::channels::apply_channel_env_overlay(
             &mut mcp_servers,
             &channel_setup.active_servers,

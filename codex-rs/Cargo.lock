@@ -2067,6 +2067,7 @@ dependencies = [
  "codex-connectors",
  "codex-core",
  "codex-core-plugins",
+ "codex-crost-memory-extension",
  "codex-diagnostics",
  "codex-exec-server",
  "codex-extension-api",
@@ -2446,6 +2447,21 @@ dependencies = [
  "cc",
  "libc",
  "pkg-config",
+]
+
+[[package]]
+name = "codex-channels"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "codex-rmcp-client",
+ "codex-utils-cargo-bin",
+ "futures",
+ "pretty_assertions",
+ "rmcp",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -2880,6 +2896,7 @@ dependencies = [
  "codex-apply-patch",
  "codex-async-utils",
  "codex-attachment-store",
+ "codex-channels",
  "codex-client",
  "codex-code-mode",
  "codex-config",
@@ -3072,6 +3089,30 @@ dependencies = [
  "uuid",
  "wiremock",
  "zip",
+]
+
+[[package]]
+name = "codex-crost-memory-extension"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "codex-extension-api",
+ "codex-protocol",
+ "codex-tools",
+ "codex-utils-absolute-path",
+ "codex-utils-output-truncation",
+ "codex-utils-path-uri",
+ "pretty_assertions",
+ "rand 0.9.3",
+ "regex",
+ "reqwest 0.12.28",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3777,6 +3818,7 @@ dependencies = [
  "async-channel",
  "codex-api",
  "codex-async-utils",
+ "codex-channels",
  "codex-config",
  "codex-connectors",
  "codex-diagnostics",
@@ -4687,6 +4729,7 @@ dependencies = [
  "codex-arg0",
  "codex-backend-client",
  "codex-build-info",
+ "codex-channels",
  "codex-cloud-config",
  "codex-config",
  "codex-connectors",

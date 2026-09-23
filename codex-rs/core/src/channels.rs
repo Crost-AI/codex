@@ -29,7 +29,7 @@ use codex_channels::resolve_channels;
 use codex_config::McpServerTransportConfig;
 use codex_mcp::ChannelWiring;
 use codex_mcp::EffectiveMcpServer;
-use codex_mcp::ToolPluginProvenance;
+use codex_mcp::ToolPluginContext;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::user_input::UserInput;
 use futures::FutureExt;
@@ -86,7 +86,7 @@ impl ChannelHub {
     /// publishes the result as the session's active channel setup.
     pub(crate) fn refresh_setup(
         &self,
-        tool_plugin_provenance: &ToolPluginProvenance,
+        tool_plugin_context: &ToolPluginContext,
         mcp_servers: &HashMap<String, EffectiveMcpServer>,
     ) -> ChannelSetup {
         let entries = self
@@ -100,7 +100,7 @@ impl ChannelHub {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let setup =
-            resolve_session_channels(&entries, &policy, tool_plugin_provenance, mcp_servers);
+            resolve_session_channels(&entries, &policy, tool_plugin_context, mcp_servers);
         *self
             .setup
             .lock()
@@ -341,6 +341,7 @@ impl Session {
                 text_elements: Vec::new(),
             }],
             client_id: None,
+            acceptance_order: self.reserve_user_input_order().await,
         }];
         self.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
             .await;
@@ -386,6 +387,7 @@ impl Session {
                         text_elements: Vec::new(),
                     }],
                     client_id: None,
+                    acceptance_order: self.reserve_user_input_order().await,
                 }],
             )
             .await;
@@ -406,7 +408,7 @@ impl Session {
 fn resolve_session_channels(
     entries: &[String],
     policy: &codex_channels::ChannelsPolicy,
-    tool_plugin_provenance: &ToolPluginProvenance,
+    tool_plugin_context: &ToolPluginContext,
     mcp_servers: &HashMap<String, EffectiveMcpServer>,
 ) -> ChannelSetup {
     let configured_servers: BTreeSet<String> = mcp_servers
@@ -417,7 +419,7 @@ fn resolve_session_channels(
     let plugin_ids_by_server: BTreeMap<String, String> = configured_servers
         .iter()
         .filter_map(|name| {
-            tool_plugin_provenance
+            tool_plugin_context
                 .plugin_id_for_mcp_server_name(name)
                 .map(|plugin_id| (name.clone(), plugin_id.to_string()))
         })

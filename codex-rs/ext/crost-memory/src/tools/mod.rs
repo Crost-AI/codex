@@ -46,7 +46,7 @@ pub(super) fn crost_memory_function_tool<I: JsonSchema, O: JsonSchema>(
         defer_loading: None,
         parameters: parse_tool_input_schema(&schema::input_schema_for::<I>())
             .unwrap_or_else(|err| panic!("generated input schema for {name} should parse: {err}")),
-        output_schema: Some(schema::output_schema_for::<O>()),
+        output_schema: Some(schema::output_schema_for::<O>().into()),
     };
 
     ToolSpec::Namespace(ResponsesApiNamespace {
