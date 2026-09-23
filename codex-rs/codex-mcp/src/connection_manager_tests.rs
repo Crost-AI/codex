@@ -2053,6 +2053,7 @@ async fn read_only_apps_discovery_never_uses_a_shared_writable_catalog() -> anyh
                 auth_manager: None,
                 elicitation_reviewer: None,
                 elicitation_lifecycle: None,
+                channel_wiring: None,
             },
             ElicitationRequestRouter::default(),
         )
@@ -2137,6 +2138,7 @@ async fn hosted_apps_protocol_mode_is_independent_of_generic_mode() -> anyhow::R
                 auth_manager: None,
                 elicitation_reviewer: None,
                 elicitation_lifecycle: None,
+                channel_wiring: None,
             },
             ElicitationRequestRouter::default(),
         )

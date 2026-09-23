@@ -164,6 +164,7 @@ for line in sys.stdin:
                     }
                     .boxed()
                 }),
+                /*custom_notification_handler*/ None,
             )
             .await?;
         let tools = client

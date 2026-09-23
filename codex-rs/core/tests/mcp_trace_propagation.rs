@@ -88,6 +88,7 @@ async fn mcp_requests_preserve_trace_context_across_workers_and_continuations() 
                     }
                     .boxed()
                 }),
+                /*custom_notification_handler*/ None,
             )
             .await?;
 

@@ -176,6 +176,7 @@ for line in sys.stdin:
                 }
                 .boxed()
             }),
+            /*custom_notification_handler*/ None,
         )
         .await?;
     // Keep the current-thread Tokio runtime blocked until the server has

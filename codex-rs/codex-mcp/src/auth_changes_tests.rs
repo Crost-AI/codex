@@ -53,6 +53,7 @@ async fn auth_notifications_require_opt_in_and_follow_client_lifetime() -> Resul
             ),
             Some(SEND_TIMEOUT),
             Box::new(|_, _| async { anyhow::bail!("unexpected elicitation") }.boxed()),
+            /*custom_notification_handler*/ None,
         )
         .await?;
     let (changes, receiver) = watch::channel(AuthChangeState::default());

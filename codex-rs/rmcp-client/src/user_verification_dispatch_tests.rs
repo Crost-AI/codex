@@ -24,6 +24,7 @@ fn service() -> ElicitationClientService {
         info,
         Box::new(|_, _| panic!("cancelled or malformed verification must not reach the UI")),
         ElicitationPauseState::new(),
+        /*custom_notification_handler*/ None,
     )
 }
 

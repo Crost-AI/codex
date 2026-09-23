@@ -27,4 +27,18 @@ serverCapabilities: JsonValue | null, tools: { [key in string]?: Tool },
  * Tool discovery failed and no catalog was returned.
  * Null when a catalog is returned, including cached or empty catalogs.
  */
-toolsError: string | null, resources: Array<Resource>, resourceTemplates: Array<ResourceTemplate>, authStatus: McpAuthStatus, };
+toolsError: string | null, resources: Array<Resource>, resourceTemplates: Array<ResourceTemplate>, authStatus: McpAuthStatus,
+/**
+ * Human-readable source of the winning server definition (e.g.
+ * "config.toml (user)" or "plugin `acme`"). Null when unknown.
+ */
+source: string | null,
+/**
+ * Sources of same-name definitions that lost to the winning one.
+ */
+overriddenSources: Array<string>,
+/**
+ * Whether the connected server declared the experimental `codex/channel`
+ * capability. Null while the server has not (yet) initialized.
+ */
+declaresChannelCapability: boolean | null, };

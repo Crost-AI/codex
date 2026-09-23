@@ -14,8 +14,13 @@ fn status(
 ) -> McpServerStatus {
     McpServerStatus {
         name: name.to_string(),
+        runtime_status: None,
+        plugin_id: None,
+        http_origin: None,
         server_info: None,
+        server_capabilities: None,
         tools: Default::default(),
+        tools_error: None,
         resources: Vec::new(),
         resource_templates: Vec::new(),
         auth_status: McpAuthStatus::Unsupported,
