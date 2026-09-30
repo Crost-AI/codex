@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use codex_api::ApiError;
 use codex_api::TransportError;
+use codex_core::context::GuardianContextMode;
 use codex_extension_api::ExtensionMetrics;
 
 use super::sampler::LunaSamplerError;
@@ -43,7 +44,7 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
             ApiError::Transport(TransportError::Build(_)) => "request_build_error",
             ApiError::Transport(TransportError::ResponseTooLarge { .. }) => "response_too_large",
             ApiError::Transport(TransportError::Policy(_)) => "network_policy_denied",
-            ApiError::Stream(_) => "stream_error",
+            ApiError::Stream(_) | ApiError::ContentFilter => "stream_error",
             ApiError::ContextWindowExceeded => "context_window_exceeded",
             ApiError::QuotaExceeded => "quota_exceeded",
             ApiError::UsageNotIncluded => "usage_not_included",
@@ -53,13 +54,15 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
             ApiError::CyberPolicy { .. }
             | ApiError::BioPolicy { .. }
             | ApiError::MisalignmentPolicyViolation { .. } => "policy_error",
-            ApiError::ServerOverloaded => "server_overloaded",
+            ApiError::ServerOverloaded { .. } => "server_overloaded",
+            ApiError::FlexUnavailable => "flex_unavailable",
         },
     }
 }
 
 pub(super) fn record_classification(
     metrics: Option<&dyn ExtensionMetrics>,
+    context_mode: GuardianContextMode,
     duration: Duration,
     outcome: &str,
     failure_reason: Option<&str>,
@@ -67,7 +70,10 @@ pub(super) fn record_classification(
     let Some(metrics) = metrics else {
         return;
     };
-    let mut tags = vec![("outcome", outcome)];
+    let mut tags = vec![
+        ("outcome", outcome),
+        ("context_mode", context_mode.as_str()),
+    ];
     if let Some(reason) = failure_reason {
         tags.push(("failure_reason", reason));
     }

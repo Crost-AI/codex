@@ -26,6 +26,7 @@ use codex_core::resolve_installation_id;
 use codex_core::shell::Shell;
 use codex_core::shell::get_shell_by_model_provided_path;
 use codex_core::thread_store_from_config;
+use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::RemoveOptions;
@@ -45,14 +46,17 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::Settings;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::OPENAI_FORM_EXTENSION_ID;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::openai_models::WebSearchToolType;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EnvironmentConfig;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RealtimeConversationVersion as RealtimeWsVersion;
@@ -129,6 +133,36 @@ pub fn local(cwd: AbsolutePathBuf) -> TurnEnvironmentSelection {
         cwd: PathUri::from_abs_path(&cwd),
         workspace_roots: vec![PathUri::from_abs_path(&cwd)],
         config: EnvironmentConfigState::FromThread,
+    }
+}
+
+/// Builds explicit environment configuration with the test thread's permissions and shell settings.
+pub fn environment_config_for_selection(
+    config: &Config,
+    selection: &TurnEnvironmentSelection,
+) -> EnvironmentConfig {
+    let permissions = &config.permissions;
+    let profile = permissions.permission_profile().clone();
+    let permission_profile = match permissions.active_permission_profile() {
+        Some(active) => PermissionProfileSnapshot::active_with_profile_workspace_roots(
+            profile,
+            active,
+            permissions.profile_workspace_roots().to_vec(),
+        ),
+        None => PermissionProfileSnapshot::legacy(profile),
+    };
+    EnvironmentConfig {
+        allow_login_shell: permissions.allow_login_shell,
+        workspace_roots: selection.workspace_roots.clone(),
+        permission_profile,
+        shell_environment_policy: permissions.shell_environment_policy.clone(),
+        windows_sandbox_level: WindowsSandboxLevel::from_config(config),
+        windows_sandbox_type: permissions.windows_sandbox_type,
+        use_legacy_landlock: config.features.use_legacy_landlock(),
+        exec_policy: None,
+        mcp_policy: None,
+        network_policy: None,
+        selected_capability_roots: Vec::new(),
     }
 }
 
@@ -347,6 +381,7 @@ impl TestAuth {
 
 pub struct TestCodexBuilder {
     config_mutators: Vec<Box<ConfigMutator>>,
+    thread_manager_configurer: Option<Box<dyn FnOnce(ThreadManager) -> ThreadManager + Send>>,
     auth: TestAuth,
     analytics_events_client: Option<AnalyticsEventsClient>,
     pre_build_hooks: Vec<Box<PreBuildHook>>,
@@ -369,6 +404,14 @@ pub struct TestCodexBuilder {
 impl TestCodexBuilder {
     pub fn with_thread_store(mut self, thread_store: Arc<dyn ThreadStore>) -> Self {
         self.thread_store = Some(thread_store);
+        self
+    }
+
+    pub fn with_thread_manager(
+        mut self,
+        configure: impl FnOnce(ThreadManager) -> ThreadManager + Send + 'static,
+    ) -> Self {
+        self.thread_manager_configurer = Some(Box::new(configure));
         self
     }
 
@@ -415,8 +458,8 @@ impl TestCodexBuilder {
         })
     }
 
-    pub fn with_history_mode(mut self, history_mode: ThreadHistoryMode) -> Self {
-        self.history_mode = Some(history_mode);
+    pub fn with_history_mode(mut self, history_mode: impl Into<Option<ThreadHistoryMode>>) -> Self {
+        self.history_mode = history_mode.into();
         self
     }
 
@@ -694,7 +737,7 @@ impl TestCodexBuilder {
         );
         #[cfg(not(target_os = "linux"))]
         let codex_linux_sandbox_exe = None;
-        let local_runtime_paths = codex_exec_server::ExecServerRuntimePaths::new(
+        let local_runtime_paths = codex_exec_server::ExecServerRuntimeOptions::new(
             std::env::current_exe()?,
             codex_linux_sandbox_exe,
         )?;
@@ -784,6 +827,10 @@ impl TestCodexBuilder {
                 /*attestation_provider*/ None,
                 /*external_time_provider*/ self.external_time_provider.clone(),
             );
+            let thread_manager = match self.thread_manager_configurer.take() {
+                Some(configure) => configure(thread_manager),
+                None => thread_manager,
+            };
             if config.features.enabled(Feature::CodeModeHost)
                 && let Some(code_mode_host_program) = code_mode_host_program
             {
@@ -808,7 +855,7 @@ impl TestCodexBuilder {
             (Some(path), Some(user_shell_override)) => {
                 let auth_manager = self.auth.manager_for_home(config.codex_home.as_path());
                 Box::pin(
-                    codex_core::test_support::resume_thread_from_rollout_with_user_shell_override(
+                    codex_core::test_support::resume_legacy_thread_from_rollout_with_user_shell_override(
                         thread_manager.as_ref(),
                         config.clone(),
                         path,
@@ -821,7 +868,7 @@ impl TestCodexBuilder {
             }
             (Some(path), None) => {
                 let auth_manager = self.auth.manager_for_home(config.codex_home.as_path());
-                Box::pin(thread_manager.resume_thread_from_rollout(
+                Box::pin(thread_manager.resume_legacy_thread_from_rollout(
                     config.clone(),
                     path,
                     auth_manager,
@@ -1409,6 +1456,7 @@ fn function_call_output<'a>(bodies: &'a [Value], call_id: &str) -> &'a Value {
 
 pub fn test_codex() -> TestCodexBuilder {
     TestCodexBuilder {
+        thread_manager_configurer: None,
         config_mutators: vec![Box::new(|config| {
             config
                 .features
@@ -1433,7 +1481,8 @@ pub fn test_codex() -> TestCodexBuilder {
         supports_openai_form_elicitation: false,
         external_time_provider: None,
         code_mode_host_program: None,
-        history_mode: None,
+        // These fixtures exercise legacy-only resume/fork helpers; store-default tests opt out.
+        history_mode: Some(ThreadHistoryMode::Legacy),
         models_manager: None,
         thread_store: None,
         image_store: codex_core::passthrough_image_store(),

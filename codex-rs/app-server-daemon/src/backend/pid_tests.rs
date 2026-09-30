@@ -109,16 +109,16 @@ async fn stop_waits_for_live_reservation_to_resolve() {
         .await
         .expect("open pid lock file");
     assert!(try_lock_file(&reservation).expect("lock reservation"));
-    let cleanup = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    let release_reservation = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
+        // Let stop() remove the stale PID file under the reservation lock.
+        // Deleting it here would race with the backend's read on Windows.
         drop(reservation);
-        tokio::fs::remove_file(pid_file)
-            .await
-            .expect("remove pid file");
     });
 
     backend.stop().await.expect("stop");
-    cleanup.await.expect("cleanup task");
+    release_reservation.await.expect("release reservation task");
+    assert!(!pid_file.exists());
 }
 
 #[tokio::test]
@@ -602,7 +602,13 @@ fn app_server_remote_control_uses_runtime_flag() {
 
     assert_eq!(
         backend.command_args(),
-        vec!["app-server", "--remote-control", "--listen", "unix://"]
+        vec![
+            "app-server",
+            "--remote-control",
+            "--listen",
+            "unix://",
+            "--analytics-default-enabled"
+        ]
     );
 }
 
@@ -616,7 +622,12 @@ fn app_server_disabled_remote_control_uses_compatible_args_and_runtime_env() {
 
     assert_eq!(
         backend.command_args(),
-        vec!["app-server", "--listen", "unix://"]
+        vec![
+            "app-server",
+            "--listen",
+            "unix://",
+            "--analytics-default-enabled"
+        ]
     );
     assert_eq!(
         backend.command_env(),

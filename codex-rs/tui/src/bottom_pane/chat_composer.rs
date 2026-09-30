@@ -2,7 +2,13 @@
 //!
 //! It edits [`TextArea`] and attachments, routes popup keys, makes completed slash commands atomic,
 //! and handles Enter/newlines. It shows Luna Reserve's yellow arrow and detects unbracketed paste
-//! bursts, especially on Windows. Copy shortcuts and right clicks preserve selected draft text.
+//! bursts, especially on Windows. Paste timing uses Tokio's clock so asynchronous flush deadlines
+//! and input classification share a clock, including in paused-time tests. Copy shortcuts and right
+//! clicks preserve selected draft text.
+//! When enabled, fullscreen right-click paste requires an editable composer without a selection,
+//! search, or blocking view. The app reads clipboard text asynchronously and delivers a normal
+//! paste only while the same thread, draft, and cursor remain eligible. Intervening input or focus
+//! loss cancels the pending paste; a late clipboard result cannot overwrite newer input.
 //! The live voice strip renders after effort ignition, followed by the Astra sparkle when eligible.
 //! Owned transcripts keep persistent status below the composer and hints on a separate final row.
 //! Shortcut help expands above the composer, with its close hint replacing the final shortcuts row
@@ -108,6 +114,7 @@
 //!
 //! # Submission and Prompt Expansion
 //!
+//! Multiline pastes continue blockquote prefixes.
 //! `Enter` submits immediately. `Tab` requests queuing while a task is running; if no task is
 //! running, `Tab` submits just like Enter so input is never dropped.
 //! Vim Replace shares Insert's composer actions; only textarea editing differs.
@@ -245,7 +252,8 @@
 //! The burst detector can also be disabled (`disable_paste_burst`), which bypasses the state
 //! machine and treats the key stream as normal typing. When toggling from enabled → disabled, the
 //! composer flushes/clears any in-flight burst state so it cannot leak into subsequent input.
-//! Mouse edits flush pending typing; selection and copy behavior lives in [`mouse`].
+//! Mouse edits flush pending typing; selection and copy behavior lives in [`mouse`]. Confirmed
+//! copies clear the selection while preserving the draft and cursor.
 //!
 //! For the detailed burst state machine, see `codex-rs/tui/src/bottom_pane/paste_burst.rs`.
 //!
@@ -555,6 +563,7 @@ pub(crate) struct ChatComposerConfig {
     pub(crate) shell_commands_enabled: bool,
     /// Whether pasting a file path can attach local images.
     pub(crate) image_paste_enabled: bool,
+    pub(crate) blockquote_paste_enabled: bool,
     /// Strip leading and trailing whitespace from submissions.
     pub(crate) trim_submission: bool,
     /// Embedded editors reset Vim only when their owner accepts the answer.
@@ -568,6 +577,7 @@ impl Default for ChatComposerConfig {
             slash_commands_enabled: true,
             shell_commands_enabled: true,
             image_paste_enabled: true,
+            blockquote_paste_enabled: true,
             trim_submission: true,
             reset_vim_on_submission: true,
         }
@@ -575,16 +585,14 @@ impl Default for ChatComposerConfig {
 }
 
 impl ChatComposerConfig {
-    /// A minimal preset for plain-text inputs embedded in other surfaces.
-    ///
-    /// This disables popups, slash and shell commands, and image-path attachment behavior
-    /// so the composer behaves like a simple notes field.
+    /// Text answers support Markdown, without popups, commands, or image attachments.
     pub(crate) const fn plain_text() -> Self {
         Self {
             popups_enabled: false,
             slash_commands_enabled: false,
             shell_commands_enabled: false,
             image_paste_enabled: false,
+            blockquote_paste_enabled: true,
             trim_submission: true,
             reset_vim_on_submission: true,
         }
@@ -1839,7 +1847,7 @@ impl ChatComposer {
     /// This also allows a single "held" ASCII char to render even when it turns out not to be part
     /// of a paste burst.
     pub(crate) fn flush_paste_burst_if_due(&mut self) -> bool {
-        self.handle_paste_burst_flush(Instant::now())
+        self.handle_paste_burst_flush(tokio::time::Instant::now().into_std())
     }
 
     /// Returns whether the composer is currently in any paste-burst related transient state.
@@ -1981,7 +1989,7 @@ impl ChatComposer {
             return self.begin_history_search();
         }
 
-        if self.handle_paste_tab(key_event, Instant::now()) {
+        if self.handle_paste_tab(key_event, tokio::time::Instant::now().into_std()) {
             return (InputResult::None, true);
         }
 
@@ -3118,7 +3126,8 @@ impl ChatComposer {
     /// Common logic for handling message submission/queuing.
     /// Returns the appropriate InputResult based on `should_queue`.
     fn handle_submission(&mut self, should_queue: bool) -> (InputResult, bool) {
-        let result = self.handle_submission_with_time(should_queue, Instant::now());
+        let result =
+            self.handle_submission_with_time(should_queue, tokio::time::Instant::now().into_std());
         self.reset_vim_mode_after_successful_dispatch(&result.0);
         result
     }
@@ -3603,7 +3612,7 @@ impl ChatComposer {
             return (InputResult::None, false);
         }
 
-        self.handle_input_basic_with_time(input, Instant::now())
+        self.handle_input_basic_with_time(input, tokio::time::Instant::now().into_std())
     }
 
     fn handle_input_basic_with_time(
@@ -4609,7 +4618,7 @@ impl ChatComposer {
             popup: popup_rect,
             footer: footer_rect,
         } = self.layout_with_options(area, options);
-        self.render_status_surface(status, buf);
+        self.render_status_surface(status, buf, options);
         if self.popups.active.is_above_composer()
             && options.command_popup_placement != CommandPopupPlacement::Hidden
         {
