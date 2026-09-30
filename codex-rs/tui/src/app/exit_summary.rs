@@ -11,6 +11,9 @@ use crate::status::remote_connection::sanitized_websocket_url;
 pub struct ResumableThread {
     pub thread_id: ThreadId,
     pub thread_name: Option<String>,
+    /// Crost: this session's `--channels` opt-ins. Channels are a per-launch
+    /// opt-in, so a bare `codex resume` would come back without the bridge.
+    pub channels: Vec<String>,
 }
 
 /// Reconnection and stop guidance for a task owned by a persistent app server.
@@ -69,7 +72,11 @@ impl App {
                 thread_id,
                 self.chat_widget.thread_name(),
                 self.chat_widget.rollout_path().as_deref(),
-            ),
+            )
+            .map(|thread| ResumableThread {
+                channels: self.chat_widget.channels_entries().to_vec(),
+                ..thread
+            }),
             disconnect_info,
             update_action: self.pending_update_action,
             exit_reason,
@@ -136,11 +143,24 @@ impl AppExitInfo {
             lines.push(format!("Session archived: {thread_id}"));
         } else if let Some(thread) = self.resume_hint {
             lines.push("To continue this session, run:".to_string());
+            // Crost: carry the channel opt-ins so the command is copy-pasteable
+            // with the bridge attached; the picker prose would drop them.
+            let channels_suffix = if thread.channels.is_empty() {
+                String::new()
+            } else {
+                format!(" --channels {}", thread.channels.join(","))
+            };
             lines.push(format!(
                 "  {}",
-                color_command(format!("codex resume {}", thread.thread_id)),
+                color_command(format!(
+                    "codex resume {}{channels_suffix}",
+                    thread.thread_id
+                )),
             ));
-            if let Some(thread_name) = thread.thread_name.filter(|name| !name.is_empty()) {
+            if let Some(thread_name) = thread
+                .thread_name
+                .filter(|name| !name.is_empty() && thread.channels.is_empty())
+            {
                 lines.push(format!(
                     "Or run {} and select {}.",
                     color_command("codex resume".to_string()),

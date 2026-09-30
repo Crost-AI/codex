@@ -499,6 +499,7 @@ fn resumable_thread(
     rollout_path_is_resumable(rollout_path).then_some(ResumableThread {
         thread_id,
         thread_name,
+        channels: Vec::new(),
     })
 }
 

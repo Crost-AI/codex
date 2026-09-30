@@ -27,7 +27,7 @@ fn stdio_server(env: Option<HashMap<String, String>>) -> EffectiveMcpServer {
     {
         *config_env = env;
     }
-    EffectiveMcpServer::configured(config)
+    EffectiveMcpServer::from_host_config(config)
 }
 
 fn server_env(server: &EffectiveMcpServer) -> Option<HashMap<String, String>> {

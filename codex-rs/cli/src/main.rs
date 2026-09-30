@@ -3677,6 +3677,7 @@ mod tests {
             resume_hint: thread_id.map(|thread_id| codex_tui::ResumableThread {
                 thread_id,
                 thread_name: thread_name.map(str::to_string),
+                channels: Vec::new(),
             }),
             disconnect_info: None,
             update_action: None,

@@ -82,6 +82,13 @@ impl EffectiveMcpServer {
         &self.config
     }
 
+    /// Crost: replaces the server config (e.g. the channel `.env` overlay)
+    /// while keeping the credential policy and plugin flags of this server.
+    pub fn with_config(mut self, config: McpServerConfig) -> Self {
+        self.config = config;
+        self
+    }
+
     pub fn enabled(&self) -> bool {
         self.config.enabled
     }

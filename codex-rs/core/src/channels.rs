@@ -38,6 +38,7 @@ use tracing::warn;
 
 use crate::config::Config;
 use crate::session::TurnInput;
+use crate::session::UserInputMetadata;
 use crate::session::session::Session;
 use crate::session::session::SessionSettingsUpdate;
 use crate::session::turn_context::NewTurnContextOptions;
@@ -341,7 +342,10 @@ impl Session {
                 text_elements: Vec::new(),
             }],
             client_id: None,
-            acceptance_order: self.reserve_user_input_order().await,
+            metadata: UserInputMetadata {
+                acceptance_order: Some(self.reserve_user_input_order().await),
+                origin: Default::default(),
+            },
         }];
         self.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
             .await;
@@ -387,7 +391,10 @@ impl Session {
                         text_elements: Vec::new(),
                     }],
                     client_id: None,
-                    acceptance_order: self.reserve_user_input_order().await,
+                    metadata: UserInputMetadata {
+                        acceptance_order: Some(self.reserve_user_input_order().await),
+                        origin: Default::default(),
+                    },
                 }],
             )
             .await;
@@ -506,10 +513,8 @@ pub(crate) fn apply_channel_env_overlay(
             env_vars: env_vars.clone(),
             cwd: cwd.clone(),
         };
-        mcp_servers.insert(
-            server_name.clone(),
-            EffectiveMcpServer::configured(overlaid),
-        );
+        let updated = server.clone().with_config(overlaid);
+        mcp_servers.insert(server_name.clone(), updated);
     }
 }
 

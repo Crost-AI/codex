@@ -250,6 +250,7 @@ async fn embedded_exit_keeps_the_session_summary() {
     exit_info.resume_hint = Some(ResumableThread {
         thread_id,
         thread_name: None,
+        channels: Vec::new(),
     });
     let output = exit_info
         .format_exit_messages(/*color_enabled*/ false)
@@ -259,6 +260,27 @@ async fn embedded_exit_keeps_the_session_summary() {
     Token usage: total=2 input=0 output=2
     To continue this session, run:
       codex resume THREAD_ID
+    ");
+}
+
+#[tokio::test]
+async fn embedded_exit_resume_hint_carries_channels_opt_in() {
+    let (mut app, _, _) = make_test_app_with_channels().await;
+    let thread_id = prepare_local_daemon_thread(&mut app).unwrap();
+    app.app_server_target = AppServerTarget::Embedded;
+    let mut exit_info = app.exit_info(ExitReason::UserRequested);
+    exit_info.resume_hint = Some(ResumableThread {
+        thread_id,
+        thread_name: Some("my-session".to_string()),
+        channels: vec!["server:discord".to_string()],
+    });
+    let output = exit_info
+        .format_exit_messages(/*color_enabled*/ false)
+        .join("\n")
+        .replace(&thread_id.to_string(), "THREAD_ID");
+    assert_snapshot!(output, @"
+    To continue this session, run:
+      codex resume THREAD_ID --channels server:discord
     ");
 }
 
