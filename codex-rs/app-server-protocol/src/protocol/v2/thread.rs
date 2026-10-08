@@ -544,6 +544,15 @@ impl From<ThreadTurnsListResponse> for TurnsPage {
 pub struct ThreadForkParams {
     pub thread_id: String,
 
+    /// Start from the loaded parent's effective config, tools, environments, and
+    /// persisted history to maximize prompt-cache reuse. Requires a loaded,
+    /// persisted parent and `ephemeral: true`. Enables `features.reasoning_effort_override`
+    /// on the fork. Cannot be combined with configuration overrides, `path`, `lastTurnId`,
+    /// or `beforeTurnId`.
+    #[experimental("thread/fork.experimentalPredictionMode")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub experimental_prediction_mode: bool,
+
     /// Optional last turn id to fork through, inclusive.
     ///
     /// When specified, turns after `last_turn_id` are omitted from the fork.
@@ -841,11 +850,24 @@ impl From<codex_protocol::protocol::ThreadGoal> for ThreadGoal {
     }
 }
 
+/// Distinguishes explicit user actions from automatic goal lifecycle mutations.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum ThreadGoalMutationOrigin {
+    User,
+    Automatic,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadGoalSetParams {
     pub thread_id: String,
+    /// Missing provenance does not supply user authorization.
+    #[ts(optional = nullable)]
+    pub origin: Option<ThreadGoalMutationOrigin>,
     #[ts(optional = nullable)]
     pub objective: Option<String>,
     #[ts(optional = nullable)]
@@ -886,6 +908,9 @@ pub struct ThreadGoalGetResponse {
 #[ts(export_to = "v2/")]
 pub struct ThreadGoalClearParams {
     pub thread_id: String,
+    /// Missing provenance does not supply user authorization.
+    #[ts(optional = nullable)]
+    pub origin: Option<ThreadGoalMutationOrigin>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -1382,6 +1407,11 @@ pub struct ThreadListParams {
     /// Optional page size; defaults to a reasonable server-side value.
     #[ts(optional = nullable)]
     pub limit: Option<u32>,
+    /// Thread IDs to exclude before applying the result limit. Up to 100
+    /// entries; invalid IDs or a larger list are rejected, never truncated.
+    /// Send the same exclusions on each page. Omitted, null, or empty means no exclusions.
+    #[ts(optional = nullable)]
+    pub excluded_thread_ids: Option<Vec<String>>,
     /// Optional sort key; defaults to created_at.
     #[ts(optional = nullable)]
     pub sort_key: Option<ThreadSortKey>,
@@ -1573,8 +1603,8 @@ pub struct ThreadSearchResponse {
 #[ts(export_to = "v2/")]
 pub struct ThreadSearchOccurrencesParams {
     pub thread_id: String,
-    /// Case-insensitive literal substring to find in visible user messages and final assistant
-    /// messages.
+    /// Case-insensitive literal substring to find in visible user messages and both partial and
+    /// final assistant answers.
     pub search_term: String,
     /// Opaque cursor returned by a previous call for the same thread and search term.
     #[ts(optional = nullable)]

@@ -7,6 +7,7 @@ use codex_exec_server::ShellInfo;
 use codex_exec_server::ShellSnapshotRequest;
 use codex_features::Feature;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::sandbox::SandboxOverride;
 use codex_sandboxing::SandboxManager;
 use codex_sandboxing::SandboxablePreference;
 use codex_tools::ToolName;
@@ -37,7 +38,7 @@ impl Session {
         if !self.features().enabled(Feature::ShellSnapshotV2)
             || step_context
                 .tool_router
-                .tool_runtime(&ToolName::plain("exec_command"))
+                .registered_tool(&ToolName::plain("exec_command"))
                 .is_none()
         {
             return None;
@@ -92,6 +93,7 @@ impl Session {
                         /*has_managed_network_requirements*/ false,
                     )
                     .then(|| FileSystemSandboxContext {
+                        sandbox_override: SandboxOverride::NoOverride,
                         permissions: environment.permission_profile().clone(),
                         cwd: environment.cwd().clone(),
                         workspace_roots: environment.workspace_roots().to_vec(),
@@ -113,7 +115,7 @@ impl Session {
                     session.thread_id().to_string(),
                 );
                 inject_session_env(&mut env, session.session_id());
-                inject_apply_patch_env(&mut env, &config.features);
+                inject_apply_patch_env(&mut env);
                 inject_permission_profile_env(
                     &mut env,
                     environment.active_permission_profile().as_ref(),

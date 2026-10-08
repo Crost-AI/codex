@@ -83,6 +83,7 @@ pub struct McpRuntimeInput {
     pub ready_selected_capability_roots: Vec<SelectedCapabilityRoot>,
     pub mcp_servers: HashMap<String, EffectiveMcpServer>,
     pub submit_id: String,
+    /// Unbounded sources receive abandonment notifications; bounded sources retain request-only behavior.
     pub tx_event: Option<Sender<Event>>,
     pub startup_cancellation_token: CancellationToken,
     pub runtime_context: McpRuntimeContext,
@@ -800,6 +801,7 @@ impl McpRuntime {
     }
 
     pub async fn shutdown(&self) {
+        self.elicitation_router.close().await;
         self.latest_connections().shutdown().await;
     }
 }
@@ -812,6 +814,8 @@ pub struct SandboxState {
     pub sandbox_cwd: PathUri,
     #[serde(default)]
     pub use_legacy_landlock: bool,
+    #[serde(default)]
+    pub use_mxc: bool,
 }
 
 /// Runtime context used when resolving per-server MCP environments.
@@ -1183,6 +1187,7 @@ mod tests {
             codex_linux_sandbox_exe: None,
             sandbox_cwd,
             use_legacy_landlock: false,
+            use_mxc: false,
         };
 
         let serialized = serde_json::to_value(&sandbox_state).expect("serialize sandbox state");

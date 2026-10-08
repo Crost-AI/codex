@@ -100,16 +100,13 @@ fn test_get_command_respects_explicit_bash_shell() -> anyhow::Result<()> {
 #[cfg(unix)]
 #[test]
 fn test_get_command_keeps_path_prepends_after_login_startup() -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
     let temp_dir = tempfile::tempdir()?;
     let path_dir = temp_dir.path().join("codex '[*] path");
     let extra_path_dir = temp_dir.path().join("extra tools");
     for directory in [&path_dir, &extra_path_dir] {
         std::fs::create_dir(directory)?;
         let rg = directory.join("rg");
-        std::fs::write(&rg, "#!/bin/sh\n")?;
-        std::fs::set_permissions(&rg, std::fs::Permissions::from_mode(0o755))?;
+        codex_utils_cargo_bin::write_executable(&rg, "#!/bin/sh\n")?;
     }
     let rg = path_dir.join("rg");
     let startup = temp_dir.path().join("startup");
@@ -489,16 +486,6 @@ async fn exec_command_reuses_foreign_windows_grant() {
         )),
         ..Default::default()
     };
-    *session.active_turn.lock().await = Some(crate::state::ActiveTurn::default());
-    let turn_state = {
-        let active_turn = session.active_turn.lock().await;
-        Arc::clone(&active_turn.as_ref().expect("active turn").turn_state)
-    };
-    turn_state.lock().await.record_granted_permissions(
-        codex_exec_server::REMOTE_ENVIRONMENT_ID,
-        granted_permissions.clone(),
-    );
-
     {
         let turn = Arc::get_mut(&mut turn).expect("turn should be uniquely owned");
         let TurnEnvironmentState::Ready(environment) = turn
@@ -519,10 +506,16 @@ async fn exec_command_reuses_foreign_windows_grant() {
         );
     }
 
+    let step_context = StepContext::for_test(Arc::clone(&turn));
+    step_context.turn.record_granted_permissions(
+        codex_exec_server::REMOTE_ENVIRONMENT_ID,
+        granted_permissions.clone(),
+        /*strict_auto_review*/ false,
+    );
     let response = ExecCommandHandler::default()
         .handle(ToolInvocation {
             session: Arc::clone(&session),
-            step_context: StepContext::for_test(Arc::clone(&turn)),
+            step_context,
             turn,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),

@@ -21,6 +21,7 @@ use codex_network_proxy::PROXY_ENV_KEYS;
 use codex_network_proxy::PROXY_GIT_SSH_COMMAND_ENV_KEY;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::sandbox::SandboxOverride;
 use codex_sandboxing::SandboxManager;
 use codex_sandboxing::SandboxType;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -119,6 +120,7 @@ async fn explicit_escalation_prepares_exec_without_managed_network() -> anyhow::
     let permissions = PermissionProfile::Disabled;
     let manager = SandboxManager::new();
     let attempt = SandboxAttempt {
+        sandbox_override: SandboxOverride::NoOverride,
         sandbox: SandboxType::None,
         sandbox_requested: false,
         permissions: &permissions,
@@ -145,6 +147,7 @@ async fn explicit_escalation_prepares_exec_without_managed_network() -> anyhow::
             ),
             /*environment_id*/ None,
         )
+        .await
         .expect("prepare exec request");
 
     assert_eq!(exec_request.cwd, PathUri::from_abs_path(&command_cwd));
@@ -1299,7 +1302,7 @@ async fn snapshot_wrapper_replays_dummy_and_preserves_unbrokered_credentials() -
         let system_startup_dir = dir.path().join("system-startup");
         std::fs::create_dir(&system_startup_dir)?;
         let system_startup_zsh = system_startup_dir.join("zsh");
-        std::fs::write(
+        codex_utils_cargo_bin::write_executable(
             &system_startup_zsh,
             "#!/bin/sh\nexport OPENAI_API_KEY='sk-system-startup-secret'\nexport AUTH_HEADER='Bearer sk-system-startup-secret'\nexec /bin/zsh -ax \"$@\"\n",
         )?;

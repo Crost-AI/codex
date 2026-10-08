@@ -57,6 +57,8 @@ mod auth_recovery_policy;
 mod auto_review;
 #[path = "bedrock_multi_agent_tests.rs"]
 mod bedrock_multi_agent;
+#[path = "bedrock_service_tier_tests.rs"]
+mod bedrock_service_tier;
 mod catalog_permission_messages;
 mod cli_stream;
 mod client;
@@ -78,6 +80,7 @@ mod cyber_exec_policy;
 mod daybreak_access;
 mod deprecation_notice;
 mod direct_tool_metadata;
+mod dynamic_tool_cancellation;
 mod exec;
 mod exec_policy;
 #[cfg(not(target_os = "windows"))]
@@ -127,9 +130,10 @@ mod managed_threads;
 mod mcp_auth_elicitation;
 mod mcp_auth_refresh;
 mod mcp_ema_config;
+#[path = "mcp_executor_context_tests.rs"]
+mod mcp_executor_context;
 mod mcp_extension_protocol;
 mod mcp_optional_startup_grace;
-#[cfg(unix)]
 mod mcp_refresh_cleanup;
 mod mcp_startup_refresh_http_proxy;
 mod mcp_subagent_elicitation;
@@ -165,6 +169,7 @@ mod prompt_cache_key;
 mod prompt_caching;
 mod prompt_debug_tests;
 mod quota_exceeded;
+mod realtime_attachment;
 mod realtime_conversation;
 mod realtime_initial_items;
 mod realtime_misalignment;
@@ -210,6 +215,7 @@ mod step_settings;
 mod step_settings_snapshots;
 mod stream_error_allows_next_turn;
 mod stream_no_completed;
+mod subagent_dynamic_tools;
 mod subagent_notifications;
 mod subagent_service_tier;
 mod token_budget;
@@ -217,6 +223,7 @@ mod token_usage_rollout;
 mod tool_harness;
 mod tool_lifecycle;
 mod tool_parallelism;
+mod tool_registration_metrics;
 mod tools;
 mod truncation;
 #[path = "turn_error_details_tests.rs"]
@@ -239,13 +246,12 @@ mod unstable_features_warning;
 mod user_notification;
 mod user_shell_cmd;
 mod view_image;
+mod wake_reservation;
 mod web_search;
 #[path = "web_search_system_proxy_tests.rs"]
 mod web_search_system_proxy;
 mod websocket_fallback;
 mod window_headers;
-#[cfg(target_os = "windows")]
-mod windows_sandbox;
 mod workspace_roots;
 mod worktree_trust;
 

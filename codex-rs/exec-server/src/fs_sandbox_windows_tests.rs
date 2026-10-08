@@ -9,6 +9,8 @@ use codex_protocol::config_types::WindowsSandboxLevel;
 #[cfg(windows)]
 use codex_protocol::models::PermissionProfile;
 #[cfg(windows)]
+use codex_protocol::sandbox::SandboxOverride;
+#[cfg(windows)]
 use codex_sandboxing::SandboxExecRequest;
 #[cfg(windows)]
 use codex_sandboxing::SandboxType;
@@ -208,6 +210,7 @@ $handle = $file.SafeFileHandle.DangerousGetHandle().ToInt64()
         crate::sandboxed_file_open::open(
             command,
             PathUri::from_host_native_path(&path).expect("image path URI"),
+            crate::protocol::FsOpenMode::Read,
         ),
     )
     .await
@@ -230,6 +233,7 @@ fn powershell_command(script: &str, path: &Path) -> anyhow::Result<SandboxExecRe
     let cwd = PathUri::from_host_native_path(std::env::current_dir()?)?;
 
     Ok(SandboxExecRequest {
+        sandbox_override: SandboxOverride::NoOverride,
         command: vec![
             powershell.to_string_lossy().into_owned(),
             "-NoProfile".to_string(),

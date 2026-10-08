@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
@@ -394,7 +395,7 @@ impl MessageProcessor {
             outgoing.clone(),
         );
 
-        let pending_thread_unloads = Arc::new(Mutex::new(HashSet::new()));
+        let pending_thread_unloads = Arc::new(Mutex::new(HashMap::new()));
         let thread_watch_manager =
             crate::thread_status::ThreadWatchManager::new_with_outgoing(outgoing.clone());
         let thread_list_state_permit = Arc::new(Semaphore::new(/*permits*/ 1));
@@ -465,11 +466,8 @@ impl MessageProcessor {
             rpc_transport,
             Arc::clone(&user_verification),
         );
-        let marketplace_processor = MarketplaceRequestProcessor::new(
-            Arc::clone(&config),
-            config_manager.clone(),
-            Arc::clone(&thread_manager),
-        );
+        let marketplace_processor =
+            MarketplaceRequestProcessor::new(config_manager.clone(), Arc::clone(&thread_manager));
         let mcp_processor = McpRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),
@@ -1406,6 +1404,11 @@ impl MessageProcessor {
             ClientRequest::ThreadAttachmentList { params, .. } => {
                 self.thread_processor.thread_attachment_list(params).await
             }
+            ClientRequest::ThreadAttachmentOwnerList { params, .. } => {
+                self.thread_processor
+                    .thread_attachment_owner_list(params)
+                    .await
+            }
             ClientRequest::ThreadAttachmentRemove { params, .. } => {
                 self.thread_processor
                     .thread_attachment_remove(request_id.clone(), params)
@@ -1751,6 +1754,11 @@ impl MessageProcessor {
             ClientRequest::BedrockSetup { params, .. } => {
                 self.account_processor.bedrock_setup(params).await
             }
+            ClientRequest::BedrockCheckGovCloudRequirements { .. } => {
+                self.account_processor
+                    .bedrock_check_gov_cloud_requirements()
+                    .await
+            }
             ClientRequest::GatewayOAuthRead { .. } => {
                 Box::pin(self.account_processor.gateway_oauth_read())
                     .await
@@ -1901,3 +1909,7 @@ mod message_processor_tracing_tests;
 #[cfg(test)]
 #[path = "message_processor_gateway_oauth_tests.rs"]
 mod gateway_oauth_tests;
+
+#[cfg(test)]
+#[path = "message_processor_thread_lifecycle_tests.rs"]
+mod thread_lifecycle_tests;
