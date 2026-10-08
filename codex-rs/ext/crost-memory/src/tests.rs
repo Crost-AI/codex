@@ -2,11 +2,12 @@
 //!
 //! No real network is used: the fake provider backs every scenario.
 
-use std::marker::PhantomData;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use codex_exec_server::FileSystemEnvironmentAccessor;
+use codex_exec_server::LOCAL_FS;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 use codex_extension_api::ConversationHistory;
@@ -127,7 +128,10 @@ fn turn_input(cwd: &Path, text: &str) -> TurnInputContext<'static> {
             environment_id: "local".to_string(),
             cwd: PathUri::from_abs_path(&abs),
             is_primary: true,
-            _lifetime: PhantomData,
+            // Leaked so the context can be 'static; one small accessor per test.
+            fs: Box::leak(Box::new(FileSystemEnvironmentAccessor::unrestricted(
+                &LOCAL_FS,
+            ))),
         }],
     }
 }
